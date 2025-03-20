@@ -18,16 +18,18 @@
         z-index: 10;
         width: 100%;
         padding: 20px;
+        box-sizing: border-box;
       }
       input, button {
         padding: 10px;
-        font-size: 16px;
+        font-size: 18px;
         margin: 5px;
         border: none;
         border-radius: 4px;
+        box-sizing: border-box;
       }
       input {
-        width: calc(100% - 22px);
+        width: 100%;
       }
       button {
         cursor: pointer;
@@ -37,13 +39,17 @@
       .hidden {
         display: none;
       }
-      /* The container that holds all pages */
+      /* Container that holds all pages */
       #pages {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
         height: 100vh;
-        overflow-y: scroll;
+        overflow-y: auto;
         scroll-snap-type: y mandatory;
       }
-      /* Each page takes the full viewport height */
+      /* Each page fills the viewport */
       .page {
         height: 100vh;
         padding: 20px;
@@ -66,42 +72,9 @@
       if (apiKey) {
         document.getElementById("apiKey").classList.add("hidden");
       }
-      let currentPageIndex = 0;
-      let preloadedPageContent = null;
-      let preloadedPageTitle = null;
-      let isPreloading = false;
-
-      // On clicking OK, generate the first page and start preloading the next.
-      document.getElementById("okButton").addEventListener("click", async (event) => {
-        event.stopPropagation();
-        if (!apiKey) {
-          apiKey = document.getElementById("apiKey").value.trim();
-          if (!apiKey) {
-            alert("Please enter a valid API key.");
-            return;
-          }
-          localStorage.setItem("openaiApiKey", apiKey);
-        }
-        const subject = document.getElementById("subjectInput").value.trim();
-        if (!subject) {
-          alert("Please enter a subject.");
-          return;
-        }
-        document.getElementById("form-container").classList.add("hidden");
-        const pagesContainer = document.getElementById("pages");
-        // Generate the first page
-        const firstContent = await getGPTText(subject);
-        if (firstContent) {
-          const firstTitle = firstContent.split("\n")[0].trim();
-          searchTerms.push(firstTitle);
-          addPage(firstContent);
-          // Preload the next page in the background
-          preloadNextPage();
-        } else {
-          addPage("No content generated for: " + subject);
-        }
-      });
-
+      let currentPageIndex = 0; // Tracks the currently visible page.
+      let pagesLoaded = 0; // Total pages appended so far.
+      
       // Append a new page to the pages container.
       function addPage(content) {
         const pagesContainer = document.getElementById("pages");
@@ -109,9 +82,10 @@
         pageDiv.className = "page";
         pageDiv.innerText = content;
         pagesContainer.appendChild(pageDiv);
+        pagesLoaded++;
       }
-
-      // Call GPT to generate a research summary based on a term.
+      
+      // Call GPT to generate a research summary for a given term.
       async function getGPTText(term) {
         const prompt = `You are a creative and analytical research assistant.
 Generate a short, engaging research summary that fills an iPhone screen.
@@ -143,8 +117,8 @@ The search term is: "${term}"`;
           return null;
         }
       }
-
-      // Get a deeper search term based on the current chain.
+      
+      // Get a new search term (one level deeper) based on the chain of subjects.
       async function getChainGPTKeyword() {
         if (!apiKey) return null;
         const prompt = `You are a creative and analytical research assistant.
@@ -180,44 +154,70 @@ Return only the search term.`;
           return null;
         }
       }
-
-      // Preload the next page's content in the background.
+      
+      // Preload the next page if only the current page is loaded.
       async function preloadNextPage() {
-        if (isPreloading) return;
-        isPreloading = true;
+        // Only preload if there's exactly one more page than the current (i.e. no extra page loaded).
+        if (pagesLoaded !== currentPageIndex + 1) {
+          return;
+        }
         const newTerm = await getChainGPTKeyword();
         if (newTerm) {
           const content = await getGPTText(newTerm);
           if (content) {
-            preloadedPageContent = content;
-            preloadedPageTitle = content.split("\n")[0].trim();
-            console.log("Preloaded page ready:", preloadedPageTitle);
+            // Extract the title from the new content and add to our chain.
+            const title = content.split("\n")[0].trim();
+            searchTerms.push(title);
+            addPage(content);
           }
         }
-        isPreloading = false;
       }
-
-      // Listen for scroll events on the pages container.
-      // When the user reaches the next page, if it's preloaded, append it and then start preloading the next page.
-      const pagesContainer = document.getElementById("pages");
-      pagesContainer.addEventListener("scroll", () => {
+      
+      // Listen for scroll events. When the user scrolls sufficiently into the next page,
+      // snap to that page and trigger preloading of the following page.
+      document.getElementById("pages").addEventListener("scroll", () => {
+        const pagesContainer = document.getElementById("pages");
         const scrollPosition = pagesContainer.scrollTop;
         const viewportHeight = window.innerHeight;
-        // When scrolled to (or very near) the next page...
-        if (scrollPosition >= (currentPageIndex + 1) * viewportHeight - 10) {
-          if (preloadedPageContent) {
-            // Add the preloaded page
-            searchTerms.push(preloadedPageTitle);
+        // If the user has scrolled at least halfway into the next page…
+        if (scrollPosition >= (currentPageIndex + 0.5) * viewportHeight) {
+          // Only change page if the next page exists.
+          if (currentPageIndex < pagesLoaded - 1) {
             currentPageIndex++;
-            addPage(preloadedPageContent);
-            // Clear preloaded data and preload the next page
-            preloadedPageContent = null;
-            preloadedPageTitle = null;
-            preloadNextPage();
-          } else {
-            // If no next page is preloaded, snap back to the current page.
+            // Snap to the new page.
             pagesContainer.scrollTo({ top: currentPageIndex * viewportHeight, behavior: "smooth" });
+            // Preload the next page if needed.
+            preloadNextPage();
           }
+        }
+      });
+      
+      // When the user clicks OK, generate the first page and preload the second.
+      document.getElementById("okButton").addEventListener("click", async (event) => {
+        event.stopPropagation();
+        if (!apiKey) {
+          apiKey = document.getElementById("apiKey").value.trim();
+          if (!apiKey) {
+            alert("Please enter a valid API key.");
+            return;
+          }
+          localStorage.setItem("openaiApiKey", apiKey);
+        }
+        const subject = document.getElementById("subjectInput").value.trim();
+        if (!subject) {
+          alert("Please enter a subject.");
+          return;
+        }
+        document.getElementById("form-container").classList.add("hidden");
+        const content = await getGPTText(subject);
+        if (content) {
+          const title = content.split("\n")[0].trim();
+          searchTerms.push(title);
+          addPage(content);
+          // Preload second page immediately.
+          preloadNextPage();
+        } else {
+          addPage("No content generated for: " + subject);
         }
       });
     </script>
