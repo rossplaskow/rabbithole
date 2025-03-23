@@ -17,8 +17,11 @@
         background-color: black;
         color: white;
       }
+      /* Updated to centre the container vertically */
       #form-container {
         position: absolute;
+        top: 50%;
+        transform: translateY(-50%);
         z-index: 10;
         width: 100%;
         padding: 20px;
@@ -68,6 +71,8 @@
       <input type="text" id="apiKey" placeholder="Enter your OpenAI API key">
       <input type="text" id="subjectInput" placeholder="Enter a starting subject">
       <button id="okButton">OK</button>
+      <!-- Rabbit image, centred horizontally -->
+      <img src="rabbit.png" alt="Rabbit" style="display: block; margin: 20px auto; max-width: 200px;">
     </div>
     <div id="pages"></div>
 
