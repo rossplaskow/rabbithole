@@ -129,8 +129,9 @@ The search term is: "${term}"`;
         const prompt = `You are a creative and analytical research assistant.
 Based on the following chain of subjects: ${searchTerms.join(", ")},
 Return a single, concise search term that logically moves deeper into the subject.
-Not sideways or elaborating on the same subject. Deeper. One full step deeper, past the previous search term.
+Not sideways or elaborating on the same subject. Deeper. Logically continuing the chain of subjects.
 Your new chosen topic should be so much deeper that it doesn't include words from the previous search term.
+If it's more than 6 words, shorten your new chosen topic into 6 words or less.
 Return only the search term.`;
         try {
           const response = await fetch("https://api.openai.com/v1/chat/completions", {
