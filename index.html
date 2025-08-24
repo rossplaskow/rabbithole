@@ -110,7 +110,7 @@ The search term is: "${term}"`;
               "Authorization": "Bearer " + apiKey
             },
             body: JSON.stringify({
-              model: "gpt-5-nano-2025-08-07",
+              model: "gpt-5",
               messages: [
                 { role: "system", content: "You are a creative research assistant." },
                 { role: "user", content: prompt }
@@ -146,7 +146,7 @@ Return only the search term.`;
               "Authorization": "Bearer " + apiKey
             },
             body: JSON.stringify({
-              model: "gpt-5-nano-2025-08-07",
+              model: "gpt-5",
               messages: [
                 { role: "system", content: "You are a creative research assistant." },
                 { role: "user", content: prompt }
