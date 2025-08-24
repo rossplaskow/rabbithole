@@ -110,7 +110,7 @@ The search term is: "${term}"`;
               "Authorization": "Bearer " + apiKey
             },
             body: JSON.stringify({
-              model: "chatgpt-4o-latest",
+              model: "gpt-5-nano-2025-08-07",
               messages: [
                 { role: "system", content: "You are a creative research assistant." },
                 { role: "user", content: prompt }
@@ -146,7 +146,7 @@ Return only the search term.`;
               "Authorization": "Bearer " + apiKey
             },
             body: JSON.stringify({
-              model: "chatgpt-4o-latest",
+              model: "gpt-5-nano-2025-08-07",
               messages: [
                 { role: "system", content: "You are a creative research assistant." },
                 { role: "user", content: prompt }
