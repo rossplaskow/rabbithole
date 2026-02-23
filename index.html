@@ -94,10 +94,6 @@
       // Use nano on everything
       const MODEL = "gpt-5-nano";
 
-      // As requested: both must be medium everywhere
-      const REASONING_EFFORT = "medium";
-      const VERBOSITY = "medium";
-
       // Content constraints
       const MAX_WORDS = 200;
 
@@ -106,7 +102,15 @@
       const MIN_FONT_SIZE_PX = 12;
 
       // Networking
-      const REQUEST_TIMEOUT_MS = 20000;
+      const REQUEST_TIMEOUT_MS = 25000;
+
+      // Token budgets
+      // Give enough room so "medium" behaviour can still emit visible text.
+      const SUMMARY_MAX_OUTPUT_TOKENS = 1200;
+      const SUMMARY_RETRY_MAX_OUTPUT_TOKENS = 2400;
+
+      const CHAIN_MAX_OUTPUT_TOKENS = 120;
+      const CHAIN_RETRY_MAX_OUTPUT_TOKENS = 240;
 
       let searchTerms = [];
       let apiKey = localStorage.getItem("openaiApiKey") || "";
@@ -127,11 +131,12 @@
       function extractOutputText(data) {
         if (!data) return "";
 
-        // Convenience field when present
+        // Convenience field (sometimes present)
         if (typeof data.output_text === "string" && data.output_text.trim()) {
           return data.output_text.trim();
         }
 
+        // Standard Responses output parsing
         if (!Array.isArray(data.output)) return "";
 
         const chunks = [];
@@ -142,14 +147,10 @@
                 chunks.push(part.text);
               }
             }
-            continue;
-          }
-
-          if (item && item.type === "output_text" && typeof item.text === "string") {
+          } else if (item && item.type === "output_text" && typeof item.text === "string") {
             chunks.push(item.text);
           }
         }
-
         return chunks.join("\n").trim();
       }
 
@@ -170,7 +171,7 @@
         return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(id));
       }
 
-      async function openAIResponses({ input, instructions, max_output_tokens }) {
+      async function openAIResponsesOnce({ input, instructions, max_output_tokens }) {
         if (!apiKey) throw new Error("Missing API key.");
 
         let response;
@@ -189,30 +190,28 @@
                 model: MODEL,
                 instructions,
                 input,
-                reasoning: { effort: REASONING_EFFORT },
-                text: { verbosity: VERBOSITY },
+
+                // Important: do NOT set reasoning/text params here.
+                // Defaults apply (medium), matching your requirement.
+
                 max_output_tokens
               })
             },
             REQUEST_TIMEOUT_MS
           );
-
           raw = await response.text();
         } catch (err) {
           const extra =
             location.protocol === "file:"
               ? "\n\nYou are running from file://. Serve from http://localhost."
               : "";
-
           const corsHint = isLikelyCorsOrNetworkError(err)
             ? "\n\nThis looks like a browser CORS or network block. If this is the case, you will need to call OpenAI from a small server proxy rather than directly from the browser."
             : "";
-
           const timeoutHint =
             err && err.name === "AbortError"
-              ? "\n\nRequest timed out. Increase REQUEST_TIMEOUT_MS if needed."
+              ? "\n\nRequest timed out. Try increasing REQUEST_TIMEOUT_MS."
               : "";
-
           throw new Error(
             `${err && err.message ? err.message : String(err)}${extra}${corsHint}${timeoutHint}`
           );
@@ -234,17 +233,50 @@
           throw new Error(`OpenAI failed: ${apiMsg}`);
         }
 
-        const text = extractOutputText(data);
-        if (!text) {
-          const status = data && data.status ? data.status : "unknown";
+        return data;
+      }
+
+      async function openAIResponsesWithRetry({ input, instructions, max_output_tokens, retry_max_output_tokens }) {
+        const data1 = await openAIResponsesOnce({ input, instructions, max_output_tokens });
+        const text1 = extractOutputText(data1);
+
+        // If we got text, return it regardless of status.
+        if (text1) return { text: text1, data: data1 };
+
+        // If no text and status is incomplete, retry once with a larger budget.
+        const status1 = data1 && data1.status ? data1.status : "unknown";
+        const incompleteReason =
+          data1 && data1.incomplete_details && data1.incomplete_details.reason
+            ? data1.incomplete_details.reason
+            : "";
+
+        if (status1 === "incomplete" && retry_max_output_tokens) {
+          const data2 = await openAIResponsesOnce({
+            input,
+            instructions,
+            max_output_tokens: retry_max_output_tokens
+          });
+          const text2 = extractOutputText(data2);
+          if (text2) return { text: text2, data: data2 };
+
+          const status2 = data2 && data2.status ? data2.status : "unknown";
+          const reason2 =
+            data2 && data2.incomplete_details && data2.incomplete_details.reason
+              ? data2.incomplete_details.reason
+              : "";
+
           throw new Error(
-            `No text found in response (status: ${status}).\n\nRaw response keys: ${
-              data ? Object.keys(data).join(", ") : "none"
-            }`
+            `No text found in response (status: ${status2}).` +
+              (reason2 ? `\n\nincomplete_details.reason: ${reason2}` : "") +
+              `\n\nRaw response keys: ${data2 ? Object.keys(data2).join(", ") : "none"}`
           );
         }
 
-        return text;
+        throw new Error(
+          `No text found in response (status: ${status1}).` +
+            (incompleteReason ? `\n\nincomplete_details.reason: ${incompleteReason}` : "") +
+            `\n\nRaw response keys: ${data1 ? Object.keys(data1).join(", ") : "none"}`
+        );
       }
 
       function fitsInPage(el) {
@@ -304,7 +336,6 @@
         addPage(`${title}\n\n${msg}`);
       }
 
-      // Refit all pages on resize/orientation change
       window.addEventListener("resize", () => {
         const pages = document.querySelectorAll(".page");
         for (const p of pages) {
@@ -315,15 +346,19 @@
       async function getGPTText(term) {
         const prompt =
           `Generate a short, engaging research summary that fills an iPhone screen.\n` +
-          `Start with a title that is the search term, then a newline, then a concise summary.\n` +
+          `Format:\n` +
+          `Line 1: the title (exactly the search term)\n` +
+          `Line 2+: the summary\n\n` +
           `Hard limit: ${MAX_WORDS} words total (including the title).\n` +
           `If you are about to exceed the limit, compress rather than continue.\n` +
+          `No markdown.\n\n` +
           `The search term is: "${term}"`;
 
-        const text = await openAIResponses({
+        const { text } = await openAIResponsesWithRetry({
           instructions: "You are a creative and analytical research assistant.",
           input: [{ role: "user", content: prompt }],
-          max_output_tokens: 320
+          max_output_tokens: SUMMARY_MAX_OUTPUT_TOKENS,
+          retry_max_output_tokens: SUMMARY_RETRY_MAX_OUTPUT_TOKENS
         });
 
         return clampToWords(text, MAX_WORDS);
@@ -333,15 +368,16 @@
         const prompt =
           `Based on the following chain of subjects: ${searchTerms.join(", ")},\n` +
           `Return a single, concise search term that logically moves deeper into the subject.\n` +
-          `Not sideways or elaborating on the same subject. Deeper. Logically continuing the chain of subjects.\n` +
+          `Not sideways or elaborating on the same subject. Deeper. Logically continuing the chain.\n` +
           `Your new chosen topic should be so much deeper that it doesn't include words from the previous search term.\n` +
-          `If it's more than 6 words, shorten your new chosen topic into 6 words or less.\n` +
-          `Return only the search term.`;
+          `If it's more than 6 words, shorten it to 6 words or less.\n` +
+          `Return only the search term. No punctuation. No quotes.`;
 
-        const text = await openAIResponses({
+        const { text } = await openAIResponsesWithRetry({
           instructions: "You are a creative and analytical research assistant.",
           input: [{ role: "user", content: prompt }],
-          max_output_tokens: 40
+          max_output_tokens: CHAIN_MAX_OUTPUT_TOKENS,
+          retry_max_output_tokens: CHAIN_RETRY_MAX_OUTPUT_TOKENS
         });
 
         return text.trim().split("\n")[0].trim();
@@ -369,7 +405,6 @@
 
         nextPageInFlight = true;
 
-        // Create the next page immediately so the user can scroll into it
         const placeholder = addLoadingPage();
 
         try {
@@ -387,7 +422,6 @@
         }
       }
 
-      // Scroll behaviour
       document.getElementById("pages").addEventListener("scroll", () => {
         const pagesContainer = document.getElementById("pages");
         const scrollPosition = pagesContainer.scrollTop;
@@ -400,11 +434,8 @@
               top: currentPageIndex * viewportHeight,
               behavior: "smooth"
             });
-
-            // Make sure there is always one more page beyond the current
             ensureNextPageLoaded();
           } else {
-            // If we reached the last available page (rare), start loading another
             ensureNextPageLoaded();
           }
         }
@@ -437,7 +468,6 @@
           searchTerms.push(title);
           addPage(content);
 
-          // Immediately create and start loading the next page
           ensureNextPageLoaded();
         } catch (err) {
           console.error(err);
