@@ -60,8 +60,11 @@
         padding: 20px;
         box-sizing: border-box;
         scroll-snap-align: start;
-        font-size: 20px;
         white-space: pre-wrap;
+
+        /* Base typography (what you want to reset to for each new page) */
+        font-size: 20px;
+        line-height: 1.35;
       }
       .small {
         opacity: 0.75;
@@ -81,26 +84,23 @@
         alt="Rabbit"
         style="display: block; margin: 20px auto; max-width: 200px"
       />
-      <div class="small">
-        Tip: serve from http://localhost while testing (not file://).
-      </div>
+      <div class="small">Tip: serve from http://localhost while testing (not file://).</div>
     </div>
 
     <div id="pages"></div>
 
     <script>
-      // Latest recommended endpoint: Responses API
       const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
-
-      // Use the model you requested
       const MODEL = "gpt-5.2-chat-latest";
 
-      // Controls supported broadly for GPT-5.2, including chat-latest:
-      // - reasoning.effort
-      // - text.verbosity
-      // - max_output_tokens
-      const DEFAULT_REASONING_EFFORT = "medium";
-      const DEFAULT_VERBOSITY = "medium";
+      const DEFAULT_REASONING_EFFORT = "none";
+      const DEFAULT_VERBOSITY = "low";
+
+      const MAX_WORDS = 200;
+
+      // Auto-fit settings
+      const BASE_FONT_SIZE_PX = 20;
+      const MIN_FONT_SIZE_PX = 12;
 
       let searchTerms = [];
       let apiKey = localStorage.getItem("openaiApiKey") || "";
@@ -111,18 +111,33 @@
       let currentPageIndex = 0;
       let pagesLoaded = 0;
 
-      function addPage(content) {
-        const pagesContainer = document.getElementById("pages");
-        const pageDiv = document.createElement("div");
-        pageDiv.className = "page";
-        pageDiv.innerText = content;
-        pagesContainer.appendChild(pageDiv);
-        pagesLoaded++;
+      function countWords(text) {
+        const tokens = String(text)
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean);
+        return tokens.length;
       }
 
-      function addErrorPage(title, err) {
-        const msg = err && err.message ? err.message : String(err);
-        addPage(`${title}\n\n${msg}`);
+      function clampToWords(text, maxWords) {
+        const tokens = String(text).trim().split(/\s+/).filter(Boolean);
+        if (tokens.length <= maxWords) return String(text).trim();
+        return tokens.slice(0, maxWords).join(" ").trim() + "…";
+      }
+
+      function extractOutputText(data) {
+        if (!data || !Array.isArray(data.output)) return "";
+        const chunks = [];
+        for (const item of data.output) {
+          if (!item || item.type !== "message") continue;
+          if (!Array.isArray(item.content)) continue;
+          for (const part of item.content) {
+            if (part && part.type === "output_text" && typeof part.text === "string") {
+              chunks.push(part.text);
+            }
+          }
+        }
+        return chunks.join("\n").trim();
       }
 
       function isLikelyCorsOrNetworkError(err) {
@@ -134,24 +149,6 @@
           msg.includes("blocked by") ||
           msg.includes("access-control-allow-origin")
         );
-      }
-
-      function extractOutputText(data) {
-        if (!data || !Array.isArray(data.output)) return "";
-
-        const chunks = [];
-        for (const item of data.output) {
-          if (!item || item.type !== "message") continue;
-          if (!Array.isArray(item.content)) continue;
-
-          for (const part of item.content) {
-            if (part && part.type === "output_text" && typeof part.text === "string") {
-              chunks.push(part.text);
-            }
-          }
-        }
-
-        return chunks.join("\n").trim();
       }
 
       async function openAIResponses({ input, instructions, max_output_tokens }) {
@@ -171,11 +168,8 @@
               model: MODEL,
               instructions,
               input,
-
-              // Use supported controls instead of temperature
               reasoning: { effort: DEFAULT_REASONING_EFFORT },
               text: { verbosity: DEFAULT_VERBOSITY },
-
               max_output_tokens
             })
           });
@@ -195,9 +189,7 @@
         let data = null;
         try {
           data = JSON.parse(raw);
-        } catch (_) {
-          // raw may be HTML or empty in some failure modes
-        }
+        } catch (_) {}
 
         if (!response.ok) {
           const apiMsg =
@@ -223,18 +215,90 @@
         return text;
       }
 
+      function addErrorPage(title, err) {
+        const msg = err && err.message ? err.message : String(err);
+        addPage(`${title}\n\n${msg}`);
+      }
+
+      function fitsInPage(el) {
+        // clientHeight excludes overflow
+        // scrollHeight includes overflow content
+        return el.scrollHeight <= el.clientHeight;
+      }
+
+      function fitTextToPage(el) {
+        // Reset per-page to base size first, then shrink only this page
+        let low = MIN_FONT_SIZE_PX;
+        let high = BASE_FONT_SIZE_PX;
+
+        el.style.fontSize = BASE_FONT_SIZE_PX + "px";
+
+        // If it already fits, we are done
+        if (fitsInPage(el)) return;
+
+        // Binary search the maximum font size that fits
+        while (high - low > 0.5) {
+          const mid = (low + high) / 2;
+          el.style.fontSize = mid + "px";
+
+          if (fitsInPage(el)) {
+            low = mid;
+          } else {
+            high = mid;
+          }
+        }
+
+        el.style.fontSize = Math.max(MIN_FONT_SIZE_PX, Math.floor(low)) + "px";
+
+        // Last resort: if still not fitting (very rare), clamp line height slightly
+        if (!fitsInPage(el)) {
+          el.style.lineHeight = "1.2";
+        }
+      }
+
+      function addPage(content) {
+        const pagesContainer = document.getElementById("pages");
+        const pageDiv = document.createElement("div");
+        pageDiv.className = "page";
+
+        // Safety net: clamp to 200 words even if the model overshoots
+        const clamped = clampToWords(content, MAX_WORDS);
+        pageDiv.innerText = clamped;
+
+        // Ensure per-page base size before fitting
+        pageDiv.style.fontSize = BASE_FONT_SIZE_PX + "px";
+        pageDiv.style.lineHeight = "1.35";
+
+        pagesContainer.appendChild(pageDiv);
+        pagesLoaded++;
+
+        // Fit after the element is in the DOM and layout has happened
+        requestAnimationFrame(() => fitTextToPage(pageDiv));
+      }
+
+      // If viewport changes (rotate, resize), refit all pages
+      window.addEventListener("resize", () => {
+        const pages = document.querySelectorAll(".page");
+        for (const p of pages) {
+          requestAnimationFrame(() => fitTextToPage(p));
+        }
+      });
+
       async function getGPTText(term) {
         const prompt =
           `Generate a short, engaging research summary that fills an iPhone screen.\n` +
           `Start with a title that is the search term, then a newline, then a concise summary.\n` +
-          `Keep the response short.\n` +
+          `Hard limit: ${MAX_WORDS} words total (including the title).\n` +
+          `If you are about to exceed the limit, compress rather than continue.\n` +
           `The search term is: "${term}"`;
 
-        return openAIResponses({
+        const text = await openAIResponses({
           instructions: "You are a creative and analytical research assistant.",
           input: [{ role: "user", content: prompt }],
-          max_output_tokens: 220
+          max_output_tokens: 260
         });
+
+        return clampToWords(text, MAX_WORDS);
       }
 
       async function getChainGPTKeyword() {
@@ -265,6 +329,8 @@
           if (!newTerm) return;
 
           const content = await getGPTText(newTerm);
+          if (!content) return;
+
           const title = content.split("\n")[0].trim();
           searchTerms.push(title);
           addPage(content);
