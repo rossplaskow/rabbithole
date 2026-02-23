@@ -61,7 +61,6 @@
         box-sizing: border-box;
         scroll-snap-align: start;
         white-space: pre-wrap;
-
         font-size: 20px;
         line-height: 1.35;
       }
@@ -90,193 +89,44 @@
 
     <script>
       const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
-
-      // Use nano on everything
       const MODEL = "gpt-5-nano";
+
+      // Your constraint
+      const REASONING_EFFORT = "medium";
+      const VERBOSITY = "medium";
 
       // Content constraints
       const MAX_WORDS = 200;
+      const MAX_CHAIN_WORDS = 6;
 
-      // Auto-fit settings
+      // Auto-fit
       const BASE_FONT_SIZE_PX = 20;
       const MIN_FONT_SIZE_PX = 12;
 
-      // Networking
-      const REQUEST_TIMEOUT_MS = 25000;
+      // Streaming safety
+      const REQUEST_TIMEOUT_MS = 30000;
 
-      // Token budgets
-      // Give enough room so "medium" behaviour can still emit visible text.
-      const SUMMARY_MAX_OUTPUT_TOKENS = 1200;
-      const SUMMARY_RETRY_MAX_OUTPUT_TOKENS = 2400;
+      // Make this high to avoid "incomplete" before output when reasoning is medium.
+      // We will abort early once we have enough words.
+      const HIGH_MAX_OUTPUT_TOKENS_SUMMARY = 12000;
+      const HIGH_MAX_OUTPUT_TOKENS_CHAIN = 6000;
 
-      const CHAIN_MAX_OUTPUT_TOKENS = 120;
-      const CHAIN_RETRY_MAX_OUTPUT_TOKENS = 240;
+      let apiKey = localStorage.getItem("openaiApiKey") || "";
+      if (apiKey) document.getElementById("apiKey").classList.add("hidden");
 
       let searchTerms = [];
-      let apiKey = localStorage.getItem("openaiApiKey") || "";
-      if (apiKey) {
-        document.getElementById("apiKey").classList.add("hidden");
-      }
-
       let currentPageIndex = 0;
       let pagesLoaded = 0;
       let nextPageInFlight = false;
+
+      function wordCount(text) {
+        return String(text).trim().split(/\s+/).filter(Boolean).length;
+      }
 
       function clampToWords(text, maxWords) {
         const tokens = String(text).trim().split(/\s+/).filter(Boolean);
         if (tokens.length <= maxWords) return String(text).trim();
         return tokens.slice(0, maxWords).join(" ").trim() + "…";
-      }
-
-      function extractOutputText(data) {
-        if (!data) return "";
-
-        // Convenience field (sometimes present)
-        if (typeof data.output_text === "string" && data.output_text.trim()) {
-          return data.output_text.trim();
-        }
-
-        // Standard Responses output parsing
-        if (!Array.isArray(data.output)) return "";
-
-        const chunks = [];
-        for (const item of data.output) {
-          if (item && item.type === "message" && Array.isArray(item.content)) {
-            for (const part of item.content) {
-              if (part && part.type === "output_text" && typeof part.text === "string") {
-                chunks.push(part.text);
-              }
-            }
-          } else if (item && item.type === "output_text" && typeof item.text === "string") {
-            chunks.push(item.text);
-          }
-        }
-        return chunks.join("\n").trim();
-      }
-
-      function isLikelyCorsOrNetworkError(err) {
-        const msg = (err && err.message ? err.message : String(err)).toLowerCase();
-        return (
-          msg.includes("failed to fetch") ||
-          msg.includes("networkerror") ||
-          msg.includes("cors") ||
-          msg.includes("blocked by") ||
-          msg.includes("access-control-allow-origin")
-        );
-      }
-
-      function fetchWithTimeout(url, options, timeoutMs) {
-        const controller = new AbortController();
-        const id = setTimeout(() => controller.abort(), timeoutMs);
-        return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(id));
-      }
-
-      async function openAIResponsesOnce({ input, instructions, max_output_tokens }) {
-        if (!apiKey) throw new Error("Missing API key.");
-
-        let response;
-        let raw = "";
-
-        try {
-          response = await fetchWithTimeout(
-            OPENAI_RESPONSES_URL,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + apiKey
-              },
-              body: JSON.stringify({
-                model: MODEL,
-                instructions,
-                input,
-
-                // Important: do NOT set reasoning/text params here.
-                // Defaults apply (medium), matching your requirement.
-
-                max_output_tokens
-              })
-            },
-            REQUEST_TIMEOUT_MS
-          );
-          raw = await response.text();
-        } catch (err) {
-          const extra =
-            location.protocol === "file:"
-              ? "\n\nYou are running from file://. Serve from http://localhost."
-              : "";
-          const corsHint = isLikelyCorsOrNetworkError(err)
-            ? "\n\nThis looks like a browser CORS or network block. If this is the case, you will need to call OpenAI from a small server proxy rather than directly from the browser."
-            : "";
-          const timeoutHint =
-            err && err.name === "AbortError"
-              ? "\n\nRequest timed out. Try increasing REQUEST_TIMEOUT_MS."
-              : "";
-          throw new Error(
-            `${err && err.message ? err.message : String(err)}${extra}${corsHint}${timeoutHint}`
-          );
-        }
-
-        let data = null;
-        try {
-          data = JSON.parse(raw);
-        } catch (_) {}
-
-        if (!response.ok) {
-          const apiMsg =
-            data && data.error && data.error.message ? data.error.message : raw || "Unknown error";
-          throw new Error(`OpenAI error (${response.status}): ${apiMsg}`);
-        }
-
-        if (data && data.status === "failed" && data.error) {
-          const apiMsg = data.error.message || JSON.stringify(data.error);
-          throw new Error(`OpenAI failed: ${apiMsg}`);
-        }
-
-        return data;
-      }
-
-      async function openAIResponsesWithRetry({ input, instructions, max_output_tokens, retry_max_output_tokens }) {
-        const data1 = await openAIResponsesOnce({ input, instructions, max_output_tokens });
-        const text1 = extractOutputText(data1);
-
-        // If we got text, return it regardless of status.
-        if (text1) return { text: text1, data: data1 };
-
-        // If no text and status is incomplete, retry once with a larger budget.
-        const status1 = data1 && data1.status ? data1.status : "unknown";
-        const incompleteReason =
-          data1 && data1.incomplete_details && data1.incomplete_details.reason
-            ? data1.incomplete_details.reason
-            : "";
-
-        if (status1 === "incomplete" && retry_max_output_tokens) {
-          const data2 = await openAIResponsesOnce({
-            input,
-            instructions,
-            max_output_tokens: retry_max_output_tokens
-          });
-          const text2 = extractOutputText(data2);
-          if (text2) return { text: text2, data: data2 };
-
-          const status2 = data2 && data2.status ? data2.status : "unknown";
-          const reason2 =
-            data2 && data2.incomplete_details && data2.incomplete_details.reason
-              ? data2.incomplete_details.reason
-              : "";
-
-          throw new Error(
-            `No text found in response (status: ${status2}).` +
-              (reason2 ? `\n\nincomplete_details.reason: ${reason2}` : "") +
-              `\n\nRaw response keys: ${data2 ? Object.keys(data2).join(", ") : "none"}`
-          );
-        }
-
-        throw new Error(
-          `No text found in response (status: ${status1}).` +
-            (incompleteReason ? `\n\nincomplete_details.reason: ${incompleteReason}` : "") +
-            `\n\nRaw response keys: ${data1 ? Object.keys(data1).join(", ") : "none"}`
-        );
       }
 
       function fitsInPage(el) {
@@ -295,24 +145,19 @@
         while (high - low > 0.5) {
           const mid = (low + high) / 2;
           el.style.fontSize = mid + "px";
-          if (fitsInPage(el)) {
-            low = mid;
-          } else {
-            high = mid;
-          }
+          if (fitsInPage(el)) low = mid;
+          else high = mid;
         }
 
         el.style.fontSize = Math.max(MIN_FONT_SIZE_PX, Math.floor(low)) + "px";
 
-        if (!fitsInPage(el)) {
-          el.style.lineHeight = "1.2";
-        }
+        if (!fitsInPage(el)) el.style.lineHeight = "1.2";
       }
 
       function createPageElement(text) {
         const pageDiv = document.createElement("div");
         pageDiv.className = "page";
-        pageDiv.innerText = clampToWords(text, MAX_WORDS);
+        pageDiv.innerText = text;
         pageDiv.style.fontSize = BASE_FONT_SIZE_PX + "px";
         pageDiv.style.lineHeight = "1.35";
         return pageDiv;
@@ -338,64 +183,254 @@
 
       window.addEventListener("resize", () => {
         const pages = document.querySelectorAll(".page");
-        for (const p of pages) {
-          requestAnimationFrame(() => fitTextToPage(p));
-        }
+        for (const p of pages) requestAnimationFrame(() => fitTextToPage(p));
       });
 
-      async function getGPTText(term) {
+      function isLikelyCorsOrNetworkError(err) {
+        const msg = (err && err.message ? err.message : String(err)).toLowerCase();
+        return (
+          msg.includes("failed to fetch") ||
+          msg.includes("networkerror") ||
+          msg.includes("cors") ||
+          msg.includes("blocked by") ||
+          msg.includes("access-control-allow-origin")
+        );
+      }
+
+      function makeAbortTimeout(controller, timeoutMs) {
+        const id = setTimeout(() => controller.abort(), timeoutMs);
+        return () => clearTimeout(id);
+      }
+
+      // Robust SSE text delta extractor for Responses streaming.
+      // It tries several event shapes seen across versions.
+      function extractDeltaTextFromEvent(evt) {
+        if (!evt) return "";
+
+        // Common: { type: "response.output_text.delta", delta: "..." }
+        if (evt.type === "response.output_text.delta" && typeof evt.delta === "string") return evt.delta;
+
+        // Sometimes: { type: "...", text: "..." }
+        if (typeof evt.text === "string" && evt.type && String(evt.type).includes("delta")) return evt.text;
+
+        // Sometimes: { type: "response.output.delta", delta: { ... } } or nested structures
+        if (evt.delta) {
+          if (typeof evt.delta === "string") return evt.delta;
+          if (evt.delta && typeof evt.delta.text === "string") return evt.delta.text;
+          if (evt.delta && evt.delta.content && Array.isArray(evt.delta.content)) {
+            const parts = [];
+            for (const p of evt.delta.content) {
+              if (p && typeof p.text === "string") parts.push(p.text);
+            }
+            if (parts.length) return parts.join("");
+          }
+        }
+
+        // Fallback: some servers send final response objects during stream
+        // Try to pull any output_text convenience field
+        if (typeof evt.output_text === "string") return evt.output_text;
+
+        return "";
+      }
+
+      async function streamResponse({
+        instructions,
+        input,
+        max_output_tokens,
+        onText,
+        shouldStop
+      }) {
+        if (!apiKey) throw new Error("Missing API key.");
+
+        const controller = new AbortController();
+        const clearTimeoutFn = makeAbortTimeout(controller, REQUEST_TIMEOUT_MS);
+
+        let response;
+        try {
+          response = await fetch(OPENAI_RESPONSES_URL, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": "Bearer " + apiKey
+            },
+            signal: controller.signal,
+            body: JSON.stringify({
+              model: MODEL,
+              stream: true,
+
+              instructions,
+              input,
+
+              reasoning: { effort: REASONING_EFFORT },
+              text: { verbosity: VERBOSITY },
+
+              max_output_tokens
+            })
+          });
+        } catch (err) {
+          clearTimeoutFn();
+          const extra =
+            location.protocol === "file:"
+              ? "\n\nYou are running from file://. Serve from http://localhost."
+              : "";
+          const corsHint = isLikelyCorsOrNetworkError(err)
+            ? "\n\nThis looks like a browser CORS or network block."
+            : "";
+          throw new Error(`${err && err.message ? err.message : String(err)}${extra}${corsHint}`);
+        }
+
+        if (!response.ok) {
+          clearTimeoutFn();
+          const raw = await response.text().catch(() => "");
+          let data = null;
+          try { data = JSON.parse(raw); } catch (_) {}
+          const apiMsg = data && data.error && data.error.message ? data.error.message : raw || "Unknown error";
+          throw new Error(`OpenAI error (${response.status}): ${apiMsg}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+        let fullText = "";
+
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+
+            // SSE frames separated by blank lines
+            const parts = buffer.split("\n\n");
+            buffer = parts.pop() || "";
+
+            for (const part of parts) {
+              const lines = part.split("\n").map((l) => l.trim());
+              for (const line of lines) {
+                if (!line.startsWith("data:")) continue;
+
+                const payload = line.slice(5).trim();
+                if (!payload) continue;
+
+                if (payload === "[DONE]") {
+                  clearTimeoutFn();
+                  return fullText;
+                }
+
+                let evt = null;
+                try {
+                  evt = JSON.parse(payload);
+                } catch (_) {
+                  continue;
+                }
+
+                const delta = extractDeltaTextFromEvent(evt);
+                if (delta) {
+                  fullText += delta;
+                  onText(delta, fullText);
+
+                  if (shouldStop && shouldStop(fullText)) {
+                    controller.abort();
+                    clearTimeoutFn();
+                    return fullText;
+                  }
+                }
+
+                // Some streams send final response object with a "response.completed" type
+                if (evt && evt.type && String(evt.type).includes("completed")) {
+                  clearTimeoutFn();
+                  return fullText;
+                }
+              }
+            }
+          }
+        } catch (err) {
+          // Abort is expected when we stop early.
+          if (err && err.name === "AbortError") {
+            clearTimeoutFn();
+            return fullText;
+          }
+          clearTimeoutFn();
+          throw err;
+        }
+
+        clearTimeoutFn();
+        return fullText;
+      }
+
+      async function getChainTermStreaming() {
+        const prompt =
+          `Based on the following chain of subjects: ${searchTerms.join(", ")},\n` +
+          `Return a single concise search term that moves deeper into the subject.\n` +
+          `No words from the previous term.\n` +
+          `Maximum ${MAX_CHAIN_WORDS} words.\n` +
+          `Return only the search term.`;
+
+        let captured = "";
+        const text = await streamResponse({
+          instructions: "You are a creative and analytical research assistant.",
+          input: [{ role: "user", content: prompt }],
+          max_output_tokens: HIGH_MAX_OUTPUT_TOKENS_CHAIN,
+          onText: (delta, full) => { captured = full; },
+          shouldStop: (full) => {
+            // Stop once we have a line, or enough words
+            const firstLine = full.split("\n")[0].trim();
+            if (!firstLine) return false;
+            if (wordCount(firstLine) >= MAX_CHAIN_WORDS) return true;
+            // If it looks complete (ends with no trailing partial), stop once it is short enough
+            return wordCount(firstLine) >= 2 && wordCount(firstLine) <= MAX_CHAIN_WORDS && firstLine.length >= 6;
+          }
+        });
+
+        const firstLine = (captured || text).trim().split("\n")[0].trim();
+        return firstLine;
+      }
+
+      async function getSummaryStreaming(term, pageEl) {
         const prompt =
           `Generate a short, engaging research summary that fills an iPhone screen.\n` +
           `Format:\n` +
-          `Line 1: the title (exactly the search term)\n` +
-          `Line 2+: the summary\n\n` +
-          `Hard limit: ${MAX_WORDS} words total (including the title).\n` +
-          `If you are about to exceed the limit, compress rather than continue.\n` +
+          `Line 1: title (exactly the search term)\n` +
+          `Line 2+: summary\n\n` +
+          `Hard limit: ${MAX_WORDS} words total.\n` +
           `No markdown.\n\n` +
           `The search term is: "${term}"`;
 
-        const { text } = await openAIResponsesWithRetry({
+        let full = "";
+
+        // Reset page to base styling each time we fill it
+        pageEl.style.fontSize = BASE_FONT_SIZE_PX + "px";
+        pageEl.style.lineHeight = "1.35";
+        pageEl.innerText = "";
+
+        const streamed = await streamResponse({
           instructions: "You are a creative and analytical research assistant.",
           input: [{ role: "user", content: prompt }],
-          max_output_tokens: SUMMARY_MAX_OUTPUT_TOKENS,
-          retry_max_output_tokens: SUMMARY_RETRY_MAX_OUTPUT_TOKENS
+          max_output_tokens: HIGH_MAX_OUTPUT_TOKENS_SUMMARY,
+          onText: (delta, now) => {
+            full = now;
+            // Show partial but clamped to avoid crazy overflow while streaming
+            pageEl.innerText = clampToWords(full, MAX_WORDS);
+            requestAnimationFrame(() => fitTextToPage(pageEl));
+          },
+          shouldStop: (now) => wordCount(now) >= MAX_WORDS
         });
 
-        return clampToWords(text, MAX_WORDS);
-      }
-
-      async function getChainGPTKeyword() {
-        const prompt =
-          `Based on the following chain of subjects: ${searchTerms.join(", ")},\n` +
-          `Return a single, concise search term that logically moves deeper into the subject.\n` +
-          `Not sideways or elaborating on the same subject. Deeper. Logically continuing the chain.\n` +
-          `Your new chosen topic should be so much deeper that it doesn't include words from the previous search term.\n` +
-          `If it's more than 6 words, shorten it to 6 words or less.\n` +
-          `Return only the search term. No punctuation. No quotes.`;
-
-        const { text } = await openAIResponsesWithRetry({
-          instructions: "You are a creative and analytical research assistant.",
-          input: [{ role: "user", content: prompt }],
-          max_output_tokens: CHAIN_MAX_OUTPUT_TOKENS,
-          retry_max_output_tokens: CHAIN_RETRY_MAX_OUTPUT_TOKENS
-        });
-
-        return text.trim().split("\n")[0].trim();
+        full = streamed || full;
+        return clampToWords(full, MAX_WORDS);
       }
 
       async function generateIntoPlaceholder(placeholderEl) {
-        const newTerm = await getChainGPTKeyword();
+        const newTerm = await getChainTermStreaming();
         if (!newTerm) throw new Error("No term generated.");
 
-        const content = await getGPTText(newTerm);
+        const content = await getSummaryStreaming(newTerm, placeholderEl);
         if (!content) throw new Error("No content generated.");
 
         const title = content.split("\n")[0].trim();
         searchTerms.push(title);
 
-        placeholderEl.innerText = clampToWords(content, MAX_WORDS);
-        placeholderEl.style.fontSize = BASE_FONT_SIZE_PX + "px";
-        placeholderEl.style.lineHeight = "1.35";
+        placeholderEl.innerText = content;
         requestAnimationFrame(() => fitTextToPage(placeholderEl));
       }
 
@@ -404,16 +439,14 @@
         if (pagesLoaded > currentPageIndex + 1) return;
 
         nextPageInFlight = true;
-
         const placeholder = addLoadingPage();
 
         try {
           await generateIntoPlaceholder(placeholder);
         } catch (err) {
           console.error(err);
-          placeholder.innerText = `Failed to load next page\n\n${
-            err && err.message ? err.message : String(err)
-          }`;
+          placeholder.innerText =
+            `Failed to load next page\n\n${err && err.message ? err.message : String(err)}`;
           placeholder.style.fontSize = BASE_FONT_SIZE_PX + "px";
           placeholder.style.lineHeight = "1.35";
           requestAnimationFrame(() => fitTextToPage(placeholder));
@@ -430,10 +463,7 @@
         if (scrollPosition >= (currentPageIndex + 0.5) * viewportHeight) {
           if (currentPageIndex < pagesLoaded - 1) {
             currentPageIndex++;
-            pagesContainer.scrollTo({
-              top: currentPageIndex * viewportHeight,
-              behavior: "smooth"
-            });
+            pagesContainer.scrollTo({ top: currentPageIndex * viewportHeight, behavior: "smooth" });
             ensureNextPageLoaded();
           } else {
             ensureNextPageLoaded();
@@ -463,10 +493,15 @@
         document.getElementById("form-container").classList.add("hidden");
 
         try {
-          const content = await getGPTText(subject);
+          // First page as a placeholder too, so we can stream into it
+          const firstPage = addLoadingPage();
+          const content = await getSummaryStreaming(subject, firstPage);
+
           const title = content.split("\n")[0].trim();
           searchTerms.push(title);
-          addPage(content);
+
+          firstPage.innerText = content;
+          requestAnimationFrame(() => fitTextToPage(firstPage));
 
           ensureNextPageLoaded();
         } catch (err) {
