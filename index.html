@@ -62,7 +62,6 @@
         scroll-snap-align: start;
         white-space: pre-wrap;
 
-        /* Base typography (what you want to reset to for each new page) */
         font-size: 20px;
         line-height: 1.35;
       }
@@ -91,16 +90,26 @@
 
     <script>
       const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
-      const MODEL = "gpt-5.2-chat-latest";
+
+      // Models (real, from official docs)
+      const MODEL_SUMMARY = "gpt-5.2-chat-latest"; // medium speed
+      const MODEL_CHAIN = "gpt-5-nano"; // very fast (swap to "gpt-5-mini" if you want)
 
       const DEFAULT_REASONING_EFFORT = "medium";
       const DEFAULT_VERBOSITY = "medium";
 
-      const MAX_WORDS = 100;
+      // Chain step should be as fast as possible
+      const CHAIN_REASONING_EFFORT = "none";
+      const CHAIN_VERBOSITY = "low";
+
+      const MAX_WORDS = 100; // keeping your current value
 
       // Auto-fit settings
       const BASE_FONT_SIZE_PX = 20;
       const MIN_FONT_SIZE_PX = 12;
+
+      // Networking
+      const REQUEST_TIMEOUT_MS = 20000;
 
       let searchTerms = [];
       let apiKey = localStorage.getItem("openaiApiKey") || "";
@@ -111,13 +120,8 @@
       let currentPageIndex = 0;
       let pagesLoaded = 0;
 
-      function countWords(text) {
-        const tokens = String(text)
-          .trim()
-          .split(/\s+/)
-          .filter(Boolean);
-        return tokens.length;
-      }
+      // Tracks whether we are currently generating the next page
+      let nextPageInFlight = false;
 
       function clampToWords(text, maxWords) {
         const tokens = String(text).trim().split(/\s+/).filter(Boolean);
@@ -126,17 +130,35 @@
       }
 
       function extractOutputText(data) {
-        if (!data || !Array.isArray(data.output)) return "";
+        if (!data) return "";
+
+        // Some clients expose output_text as a convenience, so try it first if present
+        if (typeof data.output_text === "string" && data.output_text.trim()) {
+          return data.output_text.trim();
+        }
+
+        // Standard Responses output parsing
+        if (!Array.isArray(data.output)) return "";
+
         const chunks = [];
         for (const item of data.output) {
-          if (!item || item.type !== "message") continue;
-          if (!Array.isArray(item.content)) continue;
-          for (const part of item.content) {
-            if (part && part.type === "output_text" && typeof part.text === "string") {
-              chunks.push(part.text);
+          // Newer and older shapes exist, so be liberal:
+          // - message items with content parts
+          // - sometimes direct output_text items
+          if (item && item.type === "message" && Array.isArray(item.content)) {
+            for (const part of item.content) {
+              if (part && part.type === "output_text" && typeof part.text === "string") {
+                chunks.push(part.text);
+              }
             }
+            continue;
+          }
+
+          if (item && item.type === "output_text" && typeof item.text === "string") {
+            chunks.push(item.text);
           }
         }
+
         return chunks.join("\n").trim();
       }
 
@@ -151,28 +173,38 @@
         );
       }
 
-      async function openAIResponses({ input, instructions, max_output_tokens }) {
+      function fetchWithTimeout(url, options, timeoutMs) {
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), timeoutMs);
+        return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(id));
+      }
+
+      async function openAIResponses({ model, input, instructions, max_output_tokens, reasoningEffort, verbosity }) {
         if (!apiKey) throw new Error("Missing API key.");
 
         let response;
         let raw = "";
 
         try {
-          response = await fetch(OPENAI_RESPONSES_URL, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": "Bearer " + apiKey
+          response = await fetchWithTimeout(
+            OPENAI_RESPONSES_URL,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + apiKey
+              },
+              body: JSON.stringify({
+                model,
+                instructions,
+                input,
+                reasoning: { effort: reasoningEffort },
+                text: { verbosity },
+                max_output_tokens
+              })
             },
-            body: JSON.stringify({
-              model: MODEL,
-              instructions,
-              input,
-              reasoning: { effort: DEFAULT_REASONING_EFFORT },
-              text: { verbosity: DEFAULT_VERBOSITY },
-              max_output_tokens
-            })
-          });
+            REQUEST_TIMEOUT_MS
+          );
 
           raw = await response.text();
         } catch (err) {
@@ -180,10 +212,17 @@
             location.protocol === "file:"
               ? "\n\nYou are running from file://. Serve from http://localhost."
               : "";
+
           const corsHint = isLikelyCorsOrNetworkError(err)
             ? "\n\nThis looks like a browser CORS or network block. If this is the case, you will need to call OpenAI from a small server proxy rather than directly from the browser."
             : "";
-          throw new Error(`${err && err.message ? err.message : String(err)}${extra}${corsHint}`);
+
+          const timeoutHint =
+            err && err.name === "AbortError"
+              ? "\n\nRequest timed out. Try a faster model for the chain step (gpt-5-nano) or increase REQUEST_TIMEOUT_MS."
+              : "";
+
+          throw new Error(`${err && err.message ? err.message : String(err)}${extra}${corsHint}${timeoutHint}`);
         }
 
         let data = null;
@@ -206,7 +245,7 @@
         if (!text) {
           const status = data && data.status ? data.status : "unknown";
           throw new Error(
-            `No output_text found (status: ${status}).\n\nRaw response keys: ${
+            `No text found in response (status: ${status}).\n\nRaw response keys: ${
               data ? Object.keys(data).join(", ") : "none"
             }`
           );
@@ -221,26 +260,21 @@
       }
 
       function fitsInPage(el) {
-        // clientHeight excludes overflow
-        // scrollHeight includes overflow content
         return el.scrollHeight <= el.clientHeight;
       }
 
       function fitTextToPage(el) {
-        // Reset per-page to base size first, then shrink only this page
         let low = MIN_FONT_SIZE_PX;
         let high = BASE_FONT_SIZE_PX;
 
         el.style.fontSize = BASE_FONT_SIZE_PX + "px";
+        el.style.lineHeight = "1.35";
 
-        // If it already fits, we are done
         if (fitsInPage(el)) return;
 
-        // Binary search the maximum font size that fits
         while (high - low > 0.5) {
           const mid = (low + high) / 2;
           el.style.fontSize = mid + "px";
-
           if (fitsInPage(el)) {
             low = mid;
           } else {
@@ -250,33 +284,34 @@
 
         el.style.fontSize = Math.max(MIN_FONT_SIZE_PX, Math.floor(low)) + "px";
 
-        // Last resort: if still not fitting (very rare), clamp line height slightly
         if (!fitsInPage(el)) {
           el.style.lineHeight = "1.2";
         }
       }
 
-      function addPage(content) {
-        const pagesContainer = document.getElementById("pages");
+      function createPageElement(text) {
         const pageDiv = document.createElement("div");
         pageDiv.className = "page";
-
-        // Safety net: clamp to 200 words even if the model overshoots
-        const clamped = clampToWords(content, MAX_WORDS);
-        pageDiv.innerText = clamped;
-
-        // Ensure per-page base size before fitting
+        pageDiv.innerText = clampToWords(text, MAX_WORDS);
         pageDiv.style.fontSize = BASE_FONT_SIZE_PX + "px";
         pageDiv.style.lineHeight = "1.35";
-
-        pagesContainer.appendChild(pageDiv);
-        pagesLoaded++;
-
-        // Fit after the element is in the DOM and layout has happened
-        requestAnimationFrame(() => fitTextToPage(pageDiv));
+        return pageDiv;
       }
 
-      // If viewport changes (rotate, resize), refit all pages
+      function addPage(content) {
+        const pagesContainer = document.getElementById("pages");
+        const pageDiv = createPageElement(content);
+        pagesContainer.appendChild(pageDiv);
+        pagesLoaded++;
+        requestAnimationFrame(() => fitTextToPage(pageDiv));
+        return pageDiv;
+      }
+
+      function addLoadingPage() {
+        return addPage("Loading…");
+      }
+
+      // Refit all pages on resize/orientation change
       window.addEventListener("resize", () => {
         const pages = document.querySelectorAll(".page");
         for (const p of pages) {
@@ -293,17 +328,18 @@
           `The search term is: "${term}"`;
 
         const text = await openAIResponses({
+          model: MODEL_SUMMARY,
           instructions: "You are a creative and analytical research assistant.",
           input: [{ role: "user", content: prompt }],
-          max_output_tokens: 260
+          max_output_tokens: 260,
+          reasoningEffort: DEFAULT_REASONING_EFFORT,
+          verbosity: DEFAULT_VERBOSITY
         });
 
         return clampToWords(text, MAX_WORDS);
       }
 
       async function getChainGPTKeyword() {
-        if (!apiKey) return null;
-
         const prompt =
           `Based on the following chain of subjects: ${searchTerms.join(", ")},\n` +
           `Return a single, concise search term that logically moves deeper into the subject.\n` +
@@ -313,33 +349,59 @@
           `Return only the search term.`;
 
         const text = await openAIResponses({
+          model: MODEL_CHAIN,
           instructions: "You are a creative and analytical research assistant.",
           input: [{ role: "user", content: prompt }],
-          max_output_tokens: 30
+          max_output_tokens: 30,
+          reasoningEffort: CHAIN_REASONING_EFFORT,
+          verbosity: CHAIN_VERBOSITY
         });
 
         return text.trim().split("\n")[0].trim();
       }
 
-      async function preloadNextPage() {
-        if (pagesLoaded !== currentPageIndex + 1) return;
+      async function generateIntoPlaceholder(placeholderEl) {
+        const newTerm = await getChainGPTKeyword();
+        if (!newTerm) throw new Error("No term generated.");
+
+        const content = await getGPTText(newTerm);
+        if (!content) throw new Error("No content generated.");
+
+        const title = content.split("\n")[0].trim();
+        searchTerms.push(title);
+
+        placeholderEl.innerText = clampToWords(content, MAX_WORDS);
+        placeholderEl.style.fontSize = BASE_FONT_SIZE_PX + "px";
+        placeholderEl.style.lineHeight = "1.35";
+        requestAnimationFrame(() => fitTextToPage(placeholderEl));
+      }
+
+      async function ensureNextPageLoaded() {
+        // If we already have a request running, do nothing
+        if (nextPageInFlight) return;
+
+        // If there is already at least one page ahead of the current page, do nothing
+        if (pagesLoaded > currentPageIndex + 1) return;
+
+        nextPageInFlight = true;
+
+        // Create an actual next page immediately so scroll works
+        const placeholder = addLoadingPage();
 
         try {
-          const newTerm = await getChainGPTKeyword();
-          if (!newTerm) return;
-
-          const content = await getGPTText(newTerm);
-          if (!content) return;
-
-          const title = content.split("\n")[0].trim();
-          searchTerms.push(title);
-          addPage(content);
+          await generateIntoPlaceholder(placeholder);
         } catch (err) {
           console.error(err);
-          addErrorPage("Failed to load next page", err);
+          placeholder.innerText = `Failed to load next page\n\n${err && err.message ? err.message : String(err)}`;
+          placeholder.style.fontSize = BASE_FONT_SIZE_PX + "px";
+          placeholder.style.lineHeight = "1.35";
+          requestAnimationFrame(() => fitTextToPage(placeholder));
+        } finally {
+          nextPageInFlight = false;
         }
       }
 
+      // Scroll behaviour: when user goes halfway into the next page, snap and queue another
       document.getElementById("pages").addEventListener("scroll", () => {
         const pagesContainer = document.getElementById("pages");
         const scrollPosition = pagesContainer.scrollTop;
@@ -352,7 +414,9 @@
               top: currentPageIndex * viewportHeight,
               behavior: "smooth"
             });
-            preloadNextPage();
+
+            // Ensure there will be yet another page ready (or loading) beyond this one
+            ensureNextPageLoaded();
           }
         }
       });
@@ -383,7 +447,9 @@
           const title = content.split("\n")[0].trim();
           searchTerms.push(title);
           addPage(content);
-          preloadNextPage();
+
+          // Immediately create and start loading the next page
+          ensureNextPageLoaded();
         } catch (err) {
           console.error(err);
           addErrorPage("Failed to generate first page", err);
