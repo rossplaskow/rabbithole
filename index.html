@@ -81,20 +81,26 @@
         alt="Rabbit"
         style="display: block; margin: 20px auto; max-width: 200px"
       />
-      <div id="hint" class="small">
-        Tip: serve from http://localhost (not file://) while testing.
+      <div class="small">
+        Tip: serve from http://localhost while testing (not file://).
       </div>
     </div>
 
     <div id="pages"></div>
 
     <script>
-      // Current recommended endpoint: Responses API
-      // https://api.openai.com/v1/responses
+      // Latest recommended endpoint: Responses API
       const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 
-      // Requested model
+      // Use the model you requested
       const MODEL = "gpt-5.2-chat-latest";
+
+      // Controls supported broadly for GPT-5.2, including chat-latest:
+      // - reasoning.effort
+      // - text.verbosity
+      // - max_output_tokens
+      const DEFAULT_REASONING_EFFORT = "none";
+      const DEFAULT_VERBOSITY = "low";
 
       let searchTerms = [];
       let apiKey = localStorage.getItem("openaiApiKey") || "";
@@ -130,15 +136,12 @@
         );
       }
 
-      function extractOutputTextFromResponsesApi(data) {
-        // Responses API returns `output` as an array of items.
-        // Text is typically inside message items -> content parts with type "output_text".
+      function extractOutputText(data) {
         if (!data || !Array.isArray(data.output)) return "";
 
         const chunks = [];
         for (const item of data.output) {
           if (!item || item.type !== "message") continue;
-          if (item.role && item.role !== "assistant") continue;
           if (!Array.isArray(item.content)) continue;
 
           for (const part of item.content) {
@@ -147,14 +150,16 @@
             }
           }
         }
+
         return chunks.join("\n").trim();
       }
 
-      async function openAIResponses({ input, instructions, max_output_tokens, temperature }) {
+      async function openAIResponses({ input, instructions, max_output_tokens }) {
         if (!apiKey) throw new Error("Missing API key.");
 
         let response;
         let raw = "";
+
         try {
           response = await fetch(OPENAI_RESPONSES_URL, {
             method: "POST",
@@ -164,22 +169,25 @@
             },
             body: JSON.stringify({
               model: MODEL,
-              input,
               instructions,
-              max_output_tokens,
-              temperature
+              input,
+
+              // Use supported controls instead of temperature
+              reasoning: { effort: DEFAULT_REASONING_EFFORT },
+              text: { verbosity: DEFAULT_VERBOSITY },
+
+              max_output_tokens
             })
           });
 
           raw = await response.text();
         } catch (err) {
-          // This is where browser CORS / network failures usually land.
           const extra =
             location.protocol === "file:"
               ? "\n\nYou are running from file://. Serve from http://localhost."
               : "";
           const corsHint = isLikelyCorsOrNetworkError(err)
-            ? "\n\nThis looks like a browser CORS or network block. If so, you will need to call OpenAI from a tiny server proxy instead of directly from the browser."
+            ? "\n\nThis looks like a browser CORS or network block. If this is the case, you will need to call OpenAI from a small server proxy rather than directly from the browser."
             : "";
           throw new Error(`${err && err.message ? err.message : String(err)}${extra}${corsHint}`);
         }
@@ -188,29 +196,27 @@
         try {
           data = JSON.parse(raw);
         } catch (_) {
-          // leave as null
+          // raw may be HTML or empty in some failure modes
         }
 
         if (!response.ok) {
           const apiMsg =
-            data && data.error && data.error.message
-              ? data.error.message
-              : raw || "Unknown error";
+            data && data.error && data.error.message ? data.error.message : raw || "Unknown error";
           throw new Error(`OpenAI error (${response.status}): ${apiMsg}`);
         }
 
-        // If the API itself reports failure inside the object
-        if (data && data.status && data.status === "failed" && data.error) {
+        if (data && data.status === "failed" && data.error) {
           const apiMsg = data.error.message || JSON.stringify(data.error);
           throw new Error(`OpenAI failed: ${apiMsg}`);
         }
 
-        const text = extractOutputTextFromResponsesApi(data);
+        const text = extractOutputText(data);
         if (!text) {
-          // Helpful debugging payload preview without dumping everything
           const status = data && data.status ? data.status : "unknown";
           throw new Error(
-            `No output_text content found (status: ${status}).\n\nRaw response keys: ${data ? Object.keys(data).join(", ") : "none"}`
+            `No output_text found (status: ${status}).\n\nRaw response keys: ${
+              data ? Object.keys(data).join(", ") : "none"
+            }`
           );
         }
 
@@ -224,12 +230,10 @@
           `Keep the response short.\n` +
           `The search term is: "${term}"`;
 
-        // Use Responses API instructions as the high-priority system message
         return openAIResponses({
           instructions: "You are a creative and analytical research assistant.",
           input: [{ role: "user", content: prompt }],
-          max_output_tokens: 200,
-          temperature: 0.7
+          max_output_tokens: 220
         });
       }
 
@@ -239,7 +243,7 @@
         const prompt =
           `Based on the following chain of subjects: ${searchTerms.join(", ")},\n` +
           `Return a single, concise search term that logically moves deeper into the subject.\n` +
-          `Not sideways or elaborating on the same subject. Deeper. Logically continuing the chain.\n` +
+          `Not sideways or elaborating on the same subject. Deeper. Logically continuing the chain of subjects.\n` +
           `Your new chosen topic should be so much deeper that it doesn't include words from the previous search term.\n` +
           `If it's more than 6 words, shorten your new chosen topic into 6 words or less.\n` +
           `Return only the search term.`;
@@ -247,8 +251,7 @@
         const text = await openAIResponses({
           instructions: "You are a creative and analytical research assistant.",
           input: [{ role: "user", content: prompt }],
-          max_output_tokens: 20,
-          temperature: 0.7
+          max_output_tokens: 30
         });
 
         return text.trim().split("\n")[0].trim();
