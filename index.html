@@ -1,11 +1,11 @@
 <!DOCTYPE html>
 <html>
   <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-    <link rel="icon" type="image/png" href="rabbit.png">
-    <link rel="apple-touch-icon" href="rabbit.png">
+    <link rel="icon" type="image/png" href="rabbit.png" />
+    <link rel="apple-touch-icon" href="rabbit.png" />
 
     <title>RABBIT HOLE</title>
     <style>
@@ -26,7 +26,8 @@
         padding: 20px;
         box-sizing: border-box;
       }
-      input, button {
+      input,
+      button {
         padding: 10px;
         font-size: 24px;
         margin: 5px;
@@ -62,23 +63,37 @@
         font-size: 20px;
         white-space: pre-wrap;
       }
+      .small {
+        opacity: 0.75;
+        font-size: 14px;
+        margin-top: 10px;
+      }
     </style>
   </head>
+
   <body>
     <div id="form-container">
-      <input type="password" id="apiKey" placeholder="Enter your OpenAI API key">
-      <input type="text" id="subjectInput" placeholder="Enter a starting subject">
+      <input type="password" id="apiKey" placeholder="Enter your OpenAI API key" />
+      <input type="text" id="subjectInput" placeholder="Enter a starting subject" />
       <button id="okButton">OK</button>
-      <img src="rabbit.png" alt="Rabbit" style="display: block; margin: 20px auto; max-width: 200px;">
-      <div id="hint" style="opacity: 0.75; font-size: 14px; margin-top: 10px;">
-        Tip: if this page is opened as a file, serve it from http://localhost instead.
+      <img
+        src="rabbit.png"
+        alt="Rabbit"
+        style="display: block; margin: 20px auto; max-width: 200px"
+      />
+      <div id="hint" class="small">
+        Tip: serve from http://localhost (not file://) while testing.
       </div>
     </div>
 
     <div id="pages"></div>
 
     <script>
-      const OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions";
+      // Current recommended endpoint: Responses API
+      // https://api.openai.com/v1/responses
+      const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+
+      // Requested model
       const MODEL = "gpt-5.2-chat-latest";
 
       let searchTerms = [];
@@ -100,87 +115,143 @@
       }
 
       function addErrorPage(title, err) {
-        const msg = (err && err.message) ? err.message : String(err);
+        const msg = err && err.message ? err.message : String(err);
         addPage(`${title}\n\n${msg}`);
       }
 
-      async function openAIChat(messages, { max_completion_tokens, temperature }) {
+      function isLikelyCorsOrNetworkError(err) {
+        const msg = (err && err.message ? err.message : String(err)).toLowerCase();
+        return (
+          msg.includes("failed to fetch") ||
+          msg.includes("networkerror") ||
+          msg.includes("cors") ||
+          msg.includes("blocked by") ||
+          msg.includes("access-control-allow-origin")
+        );
+      }
+
+      function extractOutputTextFromResponsesApi(data) {
+        // Responses API returns `output` as an array of items.
+        // Text is typically inside message items -> content parts with type "output_text".
+        if (!data || !Array.isArray(data.output)) return "";
+
+        const chunks = [];
+        for (const item of data.output) {
+          if (!item || item.type !== "message") continue;
+          if (item.role && item.role !== "assistant") continue;
+          if (!Array.isArray(item.content)) continue;
+
+          for (const part of item.content) {
+            if (part && part.type === "output_text" && typeof part.text === "string") {
+              chunks.push(part.text);
+            }
+          }
+        }
+        return chunks.join("\n").trim();
+      }
+
+      async function openAIResponses({ input, instructions, max_output_tokens, temperature }) {
         if (!apiKey) throw new Error("Missing API key.");
 
-        const response = await fetch(OPENAI_CHAT_COMPLETIONS_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + apiKey
-          },
-          body: JSON.stringify({
-            model: MODEL,
-            messages,
-            max_completion_tokens,
-            temperature
-          })
-        });
+        let response;
+        let raw = "";
+        try {
+          response = await fetch(OPENAI_RESPONSES_URL, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": "Bearer " + apiKey
+            },
+            body: JSON.stringify({
+              model: MODEL,
+              input,
+              instructions,
+              max_output_tokens,
+              temperature
+            })
+          });
 
-        const raw = await response.text();
+          raw = await response.text();
+        } catch (err) {
+          // This is where browser CORS / network failures usually land.
+          const extra =
+            location.protocol === "file:"
+              ? "\n\nYou are running from file://. Serve from http://localhost."
+              : "";
+          const corsHint = isLikelyCorsOrNetworkError(err)
+            ? "\n\nThis looks like a browser CORS or network block. If so, you will need to call OpenAI from a tiny server proxy instead of directly from the browser."
+            : "";
+          throw new Error(`${err && err.message ? err.message : String(err)}${extra}${corsHint}`);
+        }
+
         let data = null;
         try {
           data = JSON.parse(raw);
         } catch (_) {
-          // Keep data null, raw may be HTML from a proxy, or empty on some failures.
+          // leave as null
         }
 
         if (!response.ok) {
-          const apiMsg = data && data.error && data.error.message ? data.error.message : raw;
-          throw new Error(`OpenAI error (${response.status}): ${apiMsg || "Unknown error"}`);
+          const apiMsg =
+            data && data.error && data.error.message
+              ? data.error.message
+              : raw || "Unknown error";
+          throw new Error(`OpenAI error (${response.status}): ${apiMsg}`);
         }
 
-        const content = data && data.choices && data.choices[0] && data.choices[0].message
-          ? data.choices[0].message.content
-          : null;
-
-        if (!content) {
-          throw new Error("OpenAI returned no message content (unexpected response shape).");
+        // If the API itself reports failure inside the object
+        if (data && data.status && data.status === "failed" && data.error) {
+          const apiMsg = data.error.message || JSON.stringify(data.error);
+          throw new Error(`OpenAI failed: ${apiMsg}`);
         }
 
-        return content.trim();
+        const text = extractOutputTextFromResponsesApi(data);
+        if (!text) {
+          // Helpful debugging payload preview without dumping everything
+          const status = data && data.status ? data.status : "unknown";
+          throw new Error(
+            `No output_text content found (status: ${status}).\n\nRaw response keys: ${data ? Object.keys(data).join(", ") : "none"}`
+          );
+        }
+
+        return text;
       }
 
       async function getGPTText(term) {
         const prompt =
-`You are a creative and analytical research assistant.
-Generate a short, engaging research summary that fills an iPhone screen.
-Start with a title that is the search term, then a newline, then a concise summary.
-Keep the response short.
-The search term is: "${term}"`;
+          `Generate a short, engaging research summary that fills an iPhone screen.\n` +
+          `Start with a title that is the search term, then a newline, then a concise summary.\n` +
+          `Keep the response short.\n` +
+          `The search term is: "${term}"`;
 
-        return openAIChat(
-          [
-            { role: "system", content: "You are a creative research assistant." },
-            { role: "user", content: prompt }
-          ],
-          { max_completion_tokens: 150, temperature: 1 }
-        );
+        // Use Responses API instructions as the high-priority system message
+        return openAIResponses({
+          instructions: "You are a creative and analytical research assistant.",
+          input: [{ role: "user", content: prompt }],
+          max_output_tokens: 200,
+          temperature: 0.7
+        });
       }
 
       async function getChainGPTKeyword() {
+        if (!apiKey) return null;
+
         const prompt =
-`You are a creative and analytical research assistant.
-Based on the following chain of subjects: ${searchTerms.join(", ")},
-Return a single, concise search term that logically moves deeper into the subject.
-Not sideways or elaborating on the same subject. Deeper. Logically continuing the chain of subjects.
-Your new chosen topic should be so much deeper that it doesn't include words from the previous search term.
-If it's more than 6 words, shorten your new chosen topic into 6 words or less.
-Return only the search term.`;
+          `Based on the following chain of subjects: ${searchTerms.join(", ")},\n` +
+          `Return a single, concise search term that logically moves deeper into the subject.\n` +
+          `Not sideways or elaborating on the same subject. Deeper. Logically continuing the chain.\n` +
+          `Your new chosen topic should be so much deeper that it doesn't include words from the previous search term.\n` +
+          `If it's more than 6 words, shorten your new chosen topic into 6 words or less.\n` +
+          `Return only the search term.`;
 
-        const text = await openAIChat(
-          [
-            { role: "system", content: "You are a creative research assistant." },
-            { role: "user", content: prompt }
-          ],
-          { max_completion_tokens: 10, temperature: 1 }
-        );
+        const text = await openAIResponses({
+          instructions: "You are a creative and analytical research assistant.",
+          input: [{ role: "user", content: prompt }],
+          max_output_tokens: 20,
+          temperature: 0.7
+        });
 
-        return text.trim();
+        return text.trim().split("\n")[0].trim();
       }
 
       async function preloadNextPage() {
@@ -191,8 +262,6 @@ Return only the search term.`;
           if (!newTerm) return;
 
           const content = await getGPTText(newTerm);
-          if (!content) return;
-
           const title = content.split("\n")[0].trim();
           searchTerms.push(title);
           addPage(content);
@@ -210,7 +279,10 @@ Return only the search term.`;
         if (scrollPosition >= (currentPageIndex + 0.5) * viewportHeight) {
           if (currentPageIndex < pagesLoaded - 1) {
             currentPageIndex++;
-            pagesContainer.scrollTo({ top: currentPageIndex * viewportHeight, behavior: "smooth" });
+            pagesContainer.scrollTo({
+              top: currentPageIndex * viewportHeight,
+              behavior: "smooth"
+            });
             preloadNextPage();
           }
         }
@@ -226,6 +298,7 @@ Return only the search term.`;
             return;
           }
           localStorage.setItem("openaiApiKey", apiKey);
+          document.getElementById("apiKey").classList.add("hidden");
         }
 
         const subject = document.getElementById("subjectInput").value.trim();
