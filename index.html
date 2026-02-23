@@ -54,6 +54,7 @@
         height: 100vh;
         overflow-y: auto;
         scroll-snap-type: y mandatory;
+        -webkit-overflow-scrolling: touch;
       }
       .page {
         height: 100vh;
@@ -91,32 +92,39 @@
       const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
       const MODEL = "gpt-5-nano";
 
+      // Your constraint
       const REASONING_EFFORT = "medium";
       const VERBOSITY = "medium";
 
-      const MAX_WORDS = 60;
+      // Content constraints
+      const MAX_WORDS = 100;
       const MAX_CHAIN_WORDS = 6;
 
+      // Auto-fit
       const BASE_FONT_SIZE_PX = 20;
       const MIN_FONT_SIZE_PX = 12;
 
+      // Streaming safety
       const REQUEST_TIMEOUT_MS = 30000;
 
-      // Keep these high to avoid "incomplete" before output when reasoning is medium.
-      // We abort early when we have enough words.
+      // Set high and abort early once we have enough words
       const HIGH_MAX_OUTPUT_TOKENS_SUMMARY = 12000;
       const HIGH_MAX_OUTPUT_TOKENS_CHAIN = 6000;
+
+      // Keep this many pages ready ahead of the one being read
+      const AHEAD_BUFFER_PAGES = 2;
 
       let apiKey = localStorage.getItem("openaiApiKey") || "";
       if (apiKey) document.getElementById("apiKey").classList.add("hidden");
 
       let searchTerms = [];
-      let currentPageIndex = 0;
       let pagesLoaded = 0;
+      let currentPageIndex = 0;
 
-      // Prefetch state
-      // We aim to always keep 1 page ahead fully loaded.
-      let prefetchInFlight = false;
+      let queueInFlight = 0;
+      let pendingAbortControllers = new Set();
+
+      const pagesContainer = document.getElementById("pages");
 
       function wordCount(text) {
         return String(text).trim().split(/\s+/).filter(Boolean).length;
@@ -153,7 +161,6 @@
       }
 
       function addPage(content) {
-        const pagesContainer = document.getElementById("pages");
         const pageDiv = document.createElement("div");
         pageDiv.className = "page";
         pageDiv.innerText = content;
@@ -221,6 +228,7 @@
         if (!apiKey) throw new Error("Missing API key.");
 
         const controller = new AbortController();
+        pendingAbortControllers.add(controller);
         const clearTimeoutFn = makeAbortTimeout(controller, REQUEST_TIMEOUT_MS);
 
         let response;
@@ -244,6 +252,7 @@
           });
         } catch (err) {
           clearTimeoutFn();
+          pendingAbortControllers.delete(controller);
           const extra =
             location.protocol === "file:"
               ? "\n\nYou are running from file://. Serve from http://localhost."
@@ -256,6 +265,7 @@
 
         if (!response.ok) {
           clearTimeoutFn();
+          pendingAbortControllers.delete(controller);
           const raw = await response.text().catch(() => "");
           let data = null;
           try { data = JSON.parse(raw); } catch (_) {}
@@ -287,15 +297,12 @@
 
                 if (payload === "[DONE]") {
                   clearTimeoutFn();
+                  pendingAbortControllers.delete(controller);
                   return fullText;
                 }
 
                 let evt = null;
-                try {
-                  evt = JSON.parse(payload);
-                } catch (_) {
-                  continue;
-                }
+                try { evt = JSON.parse(payload); } catch (_) { continue; }
 
                 const delta = extractDeltaTextFromEvent(evt);
                 if (delta) {
@@ -305,18 +312,21 @@
                   if (shouldStop && shouldStop(fullText)) {
                     controller.abort();
                     clearTimeoutFn();
+                    pendingAbortControllers.delete(controller);
                     return fullText;
                   }
                 }
 
                 if (evt && evt.type && String(evt.type).includes("completed")) {
                   clearTimeoutFn();
+                  pendingAbortControllers.delete(controller);
                   return fullText;
                 }
               }
             }
           }
         } catch (err) {
+          pendingAbortControllers.delete(controller);
           if (err && err.name === "AbortError") {
             clearTimeoutFn();
             return fullText;
@@ -326,6 +336,7 @@
         }
 
         clearTimeoutFn();
+        pendingAbortControllers.delete(controller);
         return fullText;
       }
 
@@ -346,7 +357,8 @@
           shouldStop: (full) => {
             const firstLine = full.split("\n")[0].trim();
             if (!firstLine) return false;
-            return wordCount(firstLine) >= 2 && wordCount(firstLine) <= MAX_CHAIN_WORDS && firstLine.length >= 6;
+            const wc = wordCount(firstLine);
+            return wc >= 2 && wc <= MAX_CHAIN_WORDS && firstLine.length >= 6;
           }
         });
 
@@ -364,7 +376,6 @@
           `The search term is: "${term}"`;
 
         let full = "";
-
         updatePage(pageEl, "");
 
         const streamed = await streamResponse({
@@ -395,48 +406,83 @@
         updatePage(pageEl, summary);
       }
 
-      // Prefetch: ensure one page ahead is loaded and ready
-      async function prefetchNextPageIfNeeded() {
-        if (prefetchInFlight) return;
+      function pagesAheadCount() {
+        return pagesLoaded - (currentPageIndex + 1);
+      }
 
-        // We want exactly one page ahead already created and fully loaded.
-        // If pagesLoaded is currentPageIndex + 1, there is no page ahead yet.
-        // If pagesLoaded is currentPageIndex + 2, we have one ahead.
-        const haveOneAhead = pagesLoaded >= currentPageIndex + 2;
-        if (haveOneAhead) return;
+      async function ensureAheadBuffer() {
+        // Allow multiple pages to be queued, but do not start too many at once
+        while (pagesAheadCount() < AHEAD_BUFFER_PAGES) {
+          queueInFlight++;
+          const pageEl = addPage("Loading…");
+          try {
+            await buildNextPageContentInto(pageEl);
+          } catch (err) {
+            console.error(err);
+            updatePage(
+              pageEl,
+              `Failed to load next page\n\n${err && err.message ? err.message : String(err)}`
+            );
+          } finally {
+            queueInFlight--;
+          }
 
-        prefetchInFlight = true;
-        const placeholder = addPage("Loading…");
-
-        try {
-          await buildNextPageContentInto(placeholder);
-        } catch (err) {
-          console.error(err);
-          updatePage(
-            placeholder,
-            `Failed to load next page\n\n${err && err.message ? err.message : String(err)}`
-          );
-        } finally {
-          prefetchInFlight = false;
+          // If user scrolls fast, keep looping until buffer is restored
+          if (queueInFlight > 0) break;
         }
       }
 
-      // Scroll handling: when user crosses half a page, snap and then prefetch the next.
-      document.getElementById("pages").addEventListener("scroll", () => {
-        const pagesContainer = document.getElementById("pages");
-        const scrollPosition = pagesContainer.scrollTop;
-        const viewportHeight = window.innerHeight;
+      // IntersectionObserver: whenever the last page is about to come into view, append more.
+      // This makes it feel like TikTok: you never hit the end.
+      let lastPageObserver = null;
 
-        if (scrollPosition >= (currentPageIndex + 0.5) * viewportHeight) {
-          if (currentPageIndex < pagesLoaded - 1) {
-            currentPageIndex++;
-            pagesContainer.scrollTo({ top: currentPageIndex * viewportHeight, behavior: "smooth" });
+      function resetLastPageObserver() {
+        if (lastPageObserver) lastPageObserver.disconnect();
 
-            // After we move to a new page, ensure the next one is being prepared.
-            prefetchNextPageIfNeeded();
+        lastPageObserver = new IntersectionObserver(
+          (entries) => {
+            for (const entry of entries) {
+              if (entry.isIntersecting) {
+                ensureAheadBuffer();
+              }
+            }
+          },
+          {
+            root: pagesContainer,
+            threshold: 0.5
           }
-        }
+        );
+
+        const pages = pagesContainer.querySelectorAll(".page");
+        const last = pages[pages.length - 1];
+        if (last) lastPageObserver.observe(last);
+      }
+
+      // Update current page index continuously, then keep the buffer ahead.
+      let scrollTicking = false;
+      pagesContainer.addEventListener("scroll", () => {
+        if (scrollTicking) return;
+        scrollTicking = true;
+
+        requestAnimationFrame(() => {
+          const vh = window.innerHeight || 1;
+          const idx = Math.round(pagesContainer.scrollTop / vh);
+          currentPageIndex = Math.max(0, Math.min(idx, pagesLoaded - 1));
+
+          // Keep ahead buffer as you browse
+          ensureAheadBuffer();
+
+          scrollTicking = false;
+        });
       });
+
+      // Whenever we append a page, re-observe the new last page
+      const originalAddPage = addPage;
+      addPage = function (content) {
+        const el = originalAddPage(content);
+        resetLastPageObserver();
+        return el;
+      };
 
       document.getElementById("okButton").addEventListener("click", async (event) => {
         event.stopPropagation();
@@ -457,10 +503,23 @@
           return;
         }
 
+        // Cancel any in-flight requests from a previous run
+        for (const c of pendingAbortControllers) {
+          try { c.abort(); } catch (_) {}
+        }
+        pendingAbortControllers.clear();
+
+        // Reset state
+        searchTerms = [];
+        currentPageIndex = 0;
+        pagesLoaded = 0;
+        queueInFlight = 0;
+        pagesContainer.innerHTML = "";
+
         document.getElementById("form-container").classList.add("hidden");
 
         try {
-          // First page: stream into a placeholder so it appears immediately
+          // First page streams in
           const firstPage = addPage("Loading…");
           const firstSummary = await streamSummaryIntoPage(subject, firstPage);
           const title = firstSummary.split("\n")[0].trim();
@@ -468,8 +527,8 @@
 
           updatePage(firstPage, firstSummary);
 
-          // Background prefetch the next page while the user reads
-          prefetchNextPageIfNeeded();
+          // Immediately start filling the ahead buffer in the background
+          ensureAheadBuffer();
         } catch (err) {
           console.error(err);
           addErrorPage("Failed to generate first page", err);
