@@ -92,15 +92,15 @@
       const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 
       // Models (real, from official docs)
-      const MODEL_SUMMARY = "gpt-5.2-chat-latest"; // medium speed
+      const MODEL_SUMMARY = "gpt-5-nano"; // medium speed
       const MODEL_CHAIN = "gpt-5-nano"; // very fast (swap to "gpt-5-mini" if you want)
 
       const DEFAULT_REASONING_EFFORT = "medium";
       const DEFAULT_VERBOSITY = "medium";
 
       // Chain step should be as fast as possible
-      const CHAIN_REASONING_EFFORT = "none";
-      const CHAIN_VERBOSITY = "low";
+      const CHAIN_REASONING_EFFORT = "medium";
+      const CHAIN_VERBOSITY = "medium";
 
       const MAX_WORDS = 100; // keeping your current value
 
