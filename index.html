@@ -91,23 +91,19 @@
       const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
       const MODEL = "gpt-5-nano";
 
-      // Your constraint
       const REASONING_EFFORT = "medium";
       const VERBOSITY = "medium";
 
-      // Content constraints
       const MAX_WORDS = 100;
-      const MAX_CHAIN_WORDS = 10;
+      const MAX_CHAIN_WORDS = 6;
 
-      // Auto-fit
       const BASE_FONT_SIZE_PX = 20;
       const MIN_FONT_SIZE_PX = 12;
 
-      // Streaming safety
       const REQUEST_TIMEOUT_MS = 30000;
 
-      // Make this high to avoid "incomplete" before output when reasoning is medium.
-      // We will abort early once we have enough words.
+      // Keep these high to avoid "incomplete" before output when reasoning is medium.
+      // We abort early when we have enough words.
       const HIGH_MAX_OUTPUT_TOKENS_SUMMARY = 12000;
       const HIGH_MAX_OUTPUT_TOKENS_CHAIN = 6000;
 
@@ -117,7 +113,10 @@
       let searchTerms = [];
       let currentPageIndex = 0;
       let pagesLoaded = 0;
-      let nextPageInFlight = false;
+
+      // Prefetch state
+      // We aim to always keep 1 page ahead fully loaded.
+      let prefetchInFlight = false;
 
       function wordCount(text) {
         return String(text).trim().split(/\s+/).filter(Boolean).length;
@@ -150,30 +149,27 @@
         }
 
         el.style.fontSize = Math.max(MIN_FONT_SIZE_PX, Math.floor(low)) + "px";
-
         if (!fitsInPage(el)) el.style.lineHeight = "1.2";
-      }
-
-      function createPageElement(text) {
-        const pageDiv = document.createElement("div");
-        pageDiv.className = "page";
-        pageDiv.innerText = text;
-        pageDiv.style.fontSize = BASE_FONT_SIZE_PX + "px";
-        pageDiv.style.lineHeight = "1.35";
-        return pageDiv;
       }
 
       function addPage(content) {
         const pagesContainer = document.getElementById("pages");
-        const pageDiv = createPageElement(content);
+        const pageDiv = document.createElement("div");
+        pageDiv.className = "page";
+        pageDiv.innerText = content;
+        pageDiv.style.fontSize = BASE_FONT_SIZE_PX + "px";
+        pageDiv.style.lineHeight = "1.35";
         pagesContainer.appendChild(pageDiv);
         pagesLoaded++;
         requestAnimationFrame(() => fitTextToPage(pageDiv));
         return pageDiv;
       }
 
-      function addLoadingPage() {
-        return addPage("Loading…");
+      function updatePage(pageEl, content) {
+        pageEl.innerText = content;
+        pageEl.style.fontSize = BASE_FONT_SIZE_PX + "px";
+        pageEl.style.lineHeight = "1.35";
+        requestAnimationFrame(() => fitTextToPage(pageEl));
       }
 
       function addErrorPage(title, err) {
@@ -202,18 +198,10 @@
         return () => clearTimeout(id);
       }
 
-      // Robust SSE text delta extractor for Responses streaming.
-      // It tries several event shapes seen across versions.
       function extractDeltaTextFromEvent(evt) {
         if (!evt) return "";
-
-        // Common: { type: "response.output_text.delta", delta: "..." }
         if (evt.type === "response.output_text.delta" && typeof evt.delta === "string") return evt.delta;
-
-        // Sometimes: { type: "...", text: "..." }
         if (typeof evt.text === "string" && evt.type && String(evt.type).includes("delta")) return evt.text;
-
-        // Sometimes: { type: "response.output.delta", delta: { ... } } or nested structures
         if (evt.delta) {
           if (typeof evt.delta === "string") return evt.delta;
           if (evt.delta && typeof evt.delta.text === "string") return evt.delta.text;
@@ -225,21 +213,11 @@
             if (parts.length) return parts.join("");
           }
         }
-
-        // Fallback: some servers send final response objects during stream
-        // Try to pull any output_text convenience field
         if (typeof evt.output_text === "string") return evt.output_text;
-
         return "";
       }
 
-      async function streamResponse({
-        instructions,
-        input,
-        max_output_tokens,
-        onText,
-        shouldStop
-      }) {
+      async function streamResponse({ instructions, input, max_output_tokens, onText, shouldStop }) {
         if (!apiKey) throw new Error("Missing API key.");
 
         const controller = new AbortController();
@@ -257,13 +235,10 @@
             body: JSON.stringify({
               model: MODEL,
               stream: true,
-
               instructions,
               input,
-
               reasoning: { effort: REASONING_EFFORT },
               text: { verbosity: VERBOSITY },
-
               max_output_tokens
             })
           });
@@ -299,13 +274,11 @@
             if (done) break;
 
             buffer += decoder.decode(value, { stream: true });
+            const frames = buffer.split("\n\n");
+            buffer = frames.pop() || "";
 
-            // SSE frames separated by blank lines
-            const parts = buffer.split("\n\n");
-            buffer = parts.pop() || "";
-
-            for (const part of parts) {
-              const lines = part.split("\n").map((l) => l.trim());
+            for (const frame of frames) {
+              const lines = frame.split("\n").map((l) => l.trim());
               for (const line of lines) {
                 if (!line.startsWith("data:")) continue;
 
@@ -327,7 +300,7 @@
                 const delta = extractDeltaTextFromEvent(evt);
                 if (delta) {
                   fullText += delta;
-                  onText(delta, fullText);
+                  if (onText) onText(delta, fullText);
 
                   if (shouldStop && shouldStop(fullText)) {
                     controller.abort();
@@ -336,7 +309,6 @@
                   }
                 }
 
-                // Some streams send final response object with a "response.completed" type
                 if (evt && evt.type && String(evt.type).includes("completed")) {
                   clearTimeoutFn();
                   return fullText;
@@ -345,7 +317,6 @@
             }
           }
         } catch (err) {
-          // Abort is expected when we stop early.
           if (err && err.name === "AbortError") {
             clearTimeoutFn();
             return fullText;
@@ -373,22 +344,18 @@
           max_output_tokens: HIGH_MAX_OUTPUT_TOKENS_CHAIN,
           onText: (delta, full) => { captured = full; },
           shouldStop: (full) => {
-            // Stop once we have a line, or enough words
             const firstLine = full.split("\n")[0].trim();
             if (!firstLine) return false;
-            if (wordCount(firstLine) >= MAX_CHAIN_WORDS) return true;
-            // If it looks complete (ends with no trailing partial), stop once it is short enough
             return wordCount(firstLine) >= 2 && wordCount(firstLine) <= MAX_CHAIN_WORDS && firstLine.length >= 6;
           }
         });
 
-        const firstLine = (captured || text).trim().split("\n")[0].trim();
-        return firstLine;
+        return (captured || text).trim().split("\n")[0].trim();
       }
 
-      async function getSummaryStreaming(term, pageEl) {
+      async function streamSummaryIntoPage(term, pageEl) {
         const prompt =
-          `Generate a short, engaging research summary that fills an iPhone screen.\n` +
+          `Generate a short, engaging research summary that fits on a phone screen.\n` +
           `Format:\n` +
           `Line 1: title (exactly the search term)\n` +
           `Line 2+: summary\n\n` +
@@ -398,10 +365,7 @@
 
         let full = "";
 
-        // Reset page to base styling each time we fill it
-        pageEl.style.fontSize = BASE_FONT_SIZE_PX + "px";
-        pageEl.style.lineHeight = "1.35";
-        pageEl.innerText = "";
+        updatePage(pageEl, "");
 
         const streamed = await streamResponse({
           instructions: "You are a creative and analytical research assistant.",
@@ -409,9 +373,7 @@
           max_output_tokens: HIGH_MAX_OUTPUT_TOKENS_SUMMARY,
           onText: (delta, now) => {
             full = now;
-            // Show partial but clamped to avoid crazy overflow while streaming
-            pageEl.innerText = clampToWords(full, MAX_WORDS);
-            requestAnimationFrame(() => fitTextToPage(pageEl));
+            updatePage(pageEl, clampToWords(full, MAX_WORDS));
           },
           shouldStop: (now) => wordCount(now) >= MAX_WORDS
         });
@@ -420,41 +382,46 @@
         return clampToWords(full, MAX_WORDS);
       }
 
-      async function generateIntoPlaceholder(placeholderEl) {
+      async function buildNextPageContentInto(pageEl) {
         const newTerm = await getChainTermStreaming();
         if (!newTerm) throw new Error("No term generated.");
 
-        const content = await getSummaryStreaming(newTerm, placeholderEl);
-        if (!content) throw new Error("No content generated.");
+        const summary = await streamSummaryIntoPage(newTerm, pageEl);
+        if (!summary) throw new Error("No summary generated.");
 
-        const title = content.split("\n")[0].trim();
-        searchTerms.push(title);
+        const title = summary.split("\n")[0].trim();
+        if (title) searchTerms.push(title);
 
-        placeholderEl.innerText = content;
-        requestAnimationFrame(() => fitTextToPage(placeholderEl));
+        updatePage(pageEl, summary);
       }
 
-      async function ensureNextPageLoaded() {
-        if (nextPageInFlight) return;
-        if (pagesLoaded > currentPageIndex + 1) return;
+      // Prefetch: ensure one page ahead is loaded and ready
+      async function prefetchNextPageIfNeeded() {
+        if (prefetchInFlight) return;
 
-        nextPageInFlight = true;
-        const placeholder = addLoadingPage();
+        // We want exactly one page ahead already created and fully loaded.
+        // If pagesLoaded is currentPageIndex + 1, there is no page ahead yet.
+        // If pagesLoaded is currentPageIndex + 2, we have one ahead.
+        const haveOneAhead = pagesLoaded >= currentPageIndex + 2;
+        if (haveOneAhead) return;
+
+        prefetchInFlight = true;
+        const placeholder = addPage("Loading…");
 
         try {
-          await generateIntoPlaceholder(placeholder);
+          await buildNextPageContentInto(placeholder);
         } catch (err) {
           console.error(err);
-          placeholder.innerText =
-            `Failed to load next page\n\n${err && err.message ? err.message : String(err)}`;
-          placeholder.style.fontSize = BASE_FONT_SIZE_PX + "px";
-          placeholder.style.lineHeight = "1.35";
-          requestAnimationFrame(() => fitTextToPage(placeholder));
+          updatePage(
+            placeholder,
+            `Failed to load next page\n\n${err && err.message ? err.message : String(err)}`
+          );
         } finally {
-          nextPageInFlight = false;
+          prefetchInFlight = false;
         }
       }
 
+      // Scroll handling: when user crosses half a page, snap and then prefetch the next.
       document.getElementById("pages").addEventListener("scroll", () => {
         const pagesContainer = document.getElementById("pages");
         const scrollPosition = pagesContainer.scrollTop;
@@ -464,9 +431,9 @@
           if (currentPageIndex < pagesLoaded - 1) {
             currentPageIndex++;
             pagesContainer.scrollTo({ top: currentPageIndex * viewportHeight, behavior: "smooth" });
-            ensureNextPageLoaded();
-          } else {
-            ensureNextPageLoaded();
+
+            // After we move to a new page, ensure the next one is being prepared.
+            prefetchNextPageIfNeeded();
           }
         }
       });
@@ -493,17 +460,16 @@
         document.getElementById("form-container").classList.add("hidden");
 
         try {
-          // First page as a placeholder too, so we can stream into it
-          const firstPage = addLoadingPage();
-          const content = await getSummaryStreaming(subject, firstPage);
+          // First page: stream into a placeholder so it appears immediately
+          const firstPage = addPage("Loading…");
+          const firstSummary = await streamSummaryIntoPage(subject, firstPage);
+          const title = firstSummary.split("\n")[0].trim();
+          if (title) searchTerms.push(title);
 
-          const title = content.split("\n")[0].trim();
-          searchTerms.push(title);
+          updatePage(firstPage, firstSummary);
 
-          firstPage.innerText = content;
-          requestAnimationFrame(() => fitTextToPage(firstPage));
-
-          ensureNextPageLoaded();
+          // Background prefetch the next page while the user reads
+          prefetchNextPageIfNeeded();
         } catch (err) {
           console.error(err);
           addErrorPage("Failed to generate first page", err);
