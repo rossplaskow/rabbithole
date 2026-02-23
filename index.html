@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    
+
     <link rel="icon" type="image/png" href="rabbit.png">
     <link rel="apple-touch-icon" href="rabbit.png">
 
@@ -17,7 +17,6 @@
         background-color: black;
         color: white;
       }
-      /* Updated to centre the container vertically */
       #form-container {
         position: absolute;
         top: 50%;
@@ -46,7 +45,6 @@
       .hidden {
         display: none;
       }
-      /* Container that holds all pages */
       #pages {
         position: absolute;
         top: 0;
@@ -56,36 +54,42 @@
         overflow-y: auto;
         scroll-snap-type: y mandatory;
       }
-      /* Each page fills the viewport */
       .page {
         height: 100vh;
         padding: 20px;
         box-sizing: border-box;
         scroll-snap-align: start;
         font-size: 20px;
+        white-space: pre-wrap;
       }
     </style>
   </head>
   <body>
     <div id="form-container">
-      <input type="text" id="apiKey" placeholder="Enter your OpenAI API key">
+      <input type="password" id="apiKey" placeholder="Enter your OpenAI API key">
       <input type="text" id="subjectInput" placeholder="Enter a starting subject">
       <button id="okButton">OK</button>
-      <!-- Rabbit image, centred horizontally -->
       <img src="rabbit.png" alt="Rabbit" style="display: block; margin: 20px auto; max-width: 200px;">
+      <div id="hint" style="opacity: 0.75; font-size: 14px; margin-top: 10px;">
+        Tip: if this page is opened as a file, serve it from http://localhost instead.
+      </div>
     </div>
+
     <div id="pages"></div>
 
     <script>
+      const OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions";
+      const MODEL = "gpt-5.2-chat-latest";
+
       let searchTerms = [];
       let apiKey = localStorage.getItem("openaiApiKey") || "";
       if (apiKey) {
         document.getElementById("apiKey").classList.add("hidden");
       }
-      let currentPageIndex = 0; // Tracks the currently visible page.
-      let pagesLoaded = 0; // Total pages appended so far.
-      
-      // Append a new page to the pages container.
+
+      let currentPageIndex = 0;
+      let pagesLoaded = 0;
+
       function addPage(content) {
         const pagesContainer = document.getElementById("pages");
         const pageDiv = document.createElement("div");
@@ -94,118 +98,127 @@
         pagesContainer.appendChild(pageDiv);
         pagesLoaded++;
       }
-      
-      // Call GPT to generate a research summary for a given term.
+
+      function addErrorPage(title, err) {
+        const msg = (err && err.message) ? err.message : String(err);
+        addPage(`${title}\n\n${msg}`);
+      }
+
+      async function openAIChat(messages, { max_tokens, temperature }) {
+        if (!apiKey) throw new Error("Missing API key.");
+
+        const response = await fetch(OPENAI_CHAT_COMPLETIONS_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + apiKey
+          },
+          body: JSON.stringify({
+            model: MODEL,
+            messages,
+            max_tokens,
+            temperature
+          })
+        });
+
+        const raw = await response.text();
+        let data = null;
+        try {
+          data = JSON.parse(raw);
+        } catch (_) {
+          // Keep data null, raw may be HTML from a proxy, or empty on some failures.
+        }
+
+        if (!response.ok) {
+          const apiMsg = data && data.error && data.error.message ? data.error.message : raw;
+          throw new Error(`OpenAI error (${response.status}): ${apiMsg || "Unknown error"}`);
+        }
+
+        const content = data && data.choices && data.choices[0] && data.choices[0].message
+          ? data.choices[0].message.content
+          : null;
+
+        if (!content) {
+          throw new Error("OpenAI returned no message content (unexpected response shape).");
+        }
+
+        return content.trim();
+      }
+
       async function getGPTText(term) {
-        const prompt = `You are a creative and analytical research assistant.
+        const prompt =
+`You are a creative and analytical research assistant.
 Generate a short, engaging research summary that fills an iPhone screen.
 Start with a title that is the search term, then a newline, then a concise summary.
 Keep the response short.
 The search term is: "${term}"`;
-        try {
-          const response = await fetch("https://api.openai.com/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": "Bearer " + apiKey
-            },
-            body: JSON.stringify({
-              model: "gpt-5.2-chat-latest",
-              messages: [
-                { role: "system", content: "You are a creative research assistant." },
-                { role: "user", content: prompt }
-              ],
-              max_tokens: 150,
-              temperature: 0.7
-            })
-          });
-          if (!response.ok) throw new Error("OpenAI API request failed");
-          const data = await response.json();
-          return data.choices[0].message.content.trim();
-        } catch (error) {
-          console.error("Error fetching GPT text:", error);
-          return null;
-        }
+
+        return openAIChat(
+          [
+            { role: "system", content: "You are a creative research assistant." },
+            { role: "user", content: prompt }
+          ],
+          { max_tokens: 150, temperature: 0.7 }
+        );
       }
-      
-      // Get a new search term (one level deeper) based on the chain of subjects.
+
       async function getChainGPTKeyword() {
-        if (!apiKey) return null;
-        const prompt = `You are a creative and analytical research assistant.
+        const prompt =
+`You are a creative and analytical research assistant.
 Based on the following chain of subjects: ${searchTerms.join(", ")},
 Return a single, concise search term that logically moves deeper into the subject.
 Not sideways or elaborating on the same subject. Deeper. Logically continuing the chain of subjects.
 Your new chosen topic should be so much deeper that it doesn't include words from the previous search term.
 If it's more than 6 words, shorten your new chosen topic into 6 words or less.
 Return only the search term.`;
-        try {
-          const response = await fetch("https://api.openai.com/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": "Bearer " + apiKey
-            },
-            body: JSON.stringify({
-              model: "gpt-5.2-chat-latest",
-              messages: [
-                { role: "system", content: "You are a creative research assistant." },
-                { role: "user", content: prompt }
-              ],
-              max_tokens: 10,
-              temperature: 0.7
-            })
-          });
-          if (!response.ok) throw new Error("OpenAI API request failed");
-          const data = await response.json();
-          const newTerm = data.choices[0].message.content.trim();
-          console.log("Chain GPT keyword:", newTerm);
-          return newTerm;
-        } catch (error) {
-          console.error("Error fetching chain GPT keyword:", error);
-          return null;
-        }
+
+        const text = await openAIChat(
+          [
+            { role: "system", content: "You are a creative research assistant." },
+            { role: "user", content: prompt }
+          ],
+          { max_tokens: 10, temperature: 0.7 }
+        );
+
+        return text.trim();
       }
-      
-      // Preload the next page if only the current page is loaded.
+
       async function preloadNextPage() {
-        // Only preload if there's exactly one more page than the current (i.e. no extra page loaded).
-        if (pagesLoaded !== currentPageIndex + 1) {
-          return;
-        }
-        const newTerm = await getChainGPTKeyword();
-        if (newTerm) {
+        if (pagesLoaded !== currentPageIndex + 1) return;
+
+        try {
+          const newTerm = await getChainGPTKeyword();
+          if (!newTerm) return;
+
           const content = await getGPTText(newTerm);
-          if (content) {
-            // Extract the title from the new content and add to our chain.
-            const title = content.split("\n")[0].trim();
-            searchTerms.push(title);
-            addPage(content);
-          }
+          if (!content) return;
+
+          const title = content.split("\n")[0].trim();
+          searchTerms.push(title);
+          addPage(content);
+        } catch (err) {
+          console.error(err);
+          addErrorPage("Failed to load next page", err);
         }
       }
-      
-      // Listen for scroll events. When the user scrolls sufficiently into the next page,
-      // snap to that page and trigger preloading of the following page.
+
       document.getElementById("pages").addEventListener("scroll", () => {
         const pagesContainer = document.getElementById("pages");
         const scrollPosition = pagesContainer.scrollTop;
         const viewportHeight = window.innerHeight;
-        // If the user has scrolled at least halfway into the next page…
+
         if (scrollPosition >= (currentPageIndex + 0.5) * viewportHeight) {
-          // Only change page if the next page exists.
           if (currentPageIndex < pagesLoaded - 1) {
             currentPageIndex++;
-            // Snap to the new page.
             pagesContainer.scrollTo({ top: currentPageIndex * viewportHeight, behavior: "smooth" });
-            // Preload the next page if needed.
             preloadNextPage();
           }
         }
       });
-      
-      // When the user clicks OK, generate the first page and preload the second.
+
       document.getElementById("okButton").addEventListener("click", async (event) => {
         event.stopPropagation();
+
         if (!apiKey) {
           apiKey = document.getElementById("apiKey").value.trim();
           if (!apiKey) {
@@ -214,21 +227,24 @@ Return only the search term.`;
           }
           localStorage.setItem("openaiApiKey", apiKey);
         }
+
         const subject = document.getElementById("subjectInput").value.trim();
         if (!subject) {
           alert("Please enter a subject.");
           return;
         }
+
         document.getElementById("form-container").classList.add("hidden");
-        const content = await getGPTText(subject);
-        if (content) {
+
+        try {
+          const content = await getGPTText(subject);
           const title = content.split("\n")[0].trim();
           searchTerms.push(title);
           addPage(content);
-          // Preload second page immediately.
           preloadNextPage();
-        } else {
-          addPage("No content generated for: " + subject);
+        } catch (err) {
+          console.error(err);
+          addErrorPage("Failed to generate first page", err);
         }
       });
     </script>
