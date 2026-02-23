@@ -104,7 +104,7 @@
         addPage(`${title}\n\n${msg}`);
       }
 
-      async function openAIChat(messages, { max_tokens, temperature }) {
+      async function openAIChat(messages, { max_completion_tokens, temperature }) {
         if (!apiKey) throw new Error("Missing API key.");
 
         const response = await fetch(OPENAI_CHAT_COMPLETIONS_URL, {
@@ -116,7 +116,7 @@
           body: JSON.stringify({
             model: MODEL,
             messages,
-            max_tokens,
+            max_completion_tokens,
             temperature
           })
         });
@@ -158,7 +158,7 @@ The search term is: "${term}"`;
             { role: "system", content: "You are a creative research assistant." },
             { role: "user", content: prompt }
           ],
-          { max_tokens: 150, temperature: 0.7 }
+          { max_completion_tokens: 150, temperature: 0.7 }
         );
       }
 
@@ -177,7 +177,7 @@ Return only the search term.`;
             { role: "system", content: "You are a creative research assistant." },
             { role: "user", content: prompt }
           ],
-          { max_tokens: 10, temperature: 0.7 }
+          { max_completion_tokens: 10, temperature: 0.7 }
         );
 
         return text.trim();
