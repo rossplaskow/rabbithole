@@ -158,7 +158,7 @@ The search term is: "${term}"`;
             { role: "system", content: "You are a creative research assistant." },
             { role: "user", content: prompt }
           ],
-          { max_completion_tokens: 150, temperature: 0.7 }
+          { max_completion_tokens: 150, temperature: 1 }
         );
       }
 
@@ -177,7 +177,7 @@ Return only the search term.`;
             { role: "system", content: "You are a creative research assistant." },
             { role: "user", content: prompt }
           ],
-          { max_completion_tokens: 10, temperature: 0.7 }
+          { max_completion_tokens: 10, temperature: 1 }
         );
 
         return text.trim();
