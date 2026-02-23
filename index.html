@@ -91,18 +91,15 @@
     <script>
       const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 
-      // Models (real, from official docs)
-      const MODEL_SUMMARY = "gpt-5-nano"; // medium speed
-      const MODEL_CHAIN = "gpt-5-nano"; // very fast (swap to "gpt-5-mini" if you want)
+      // Use nano on everything
+      const MODEL = "gpt-5-nano";
 
-      const DEFAULT_REASONING_EFFORT = "medium";
-      const DEFAULT_VERBOSITY = "medium";
+      // As requested: both must be medium everywhere
+      const REASONING_EFFORT = "medium";
+      const VERBOSITY = "medium";
 
-      // Chain step should be as fast as possible
-      const CHAIN_REASONING_EFFORT = "medium";
-      const CHAIN_VERBOSITY = "medium";
-
-      const MAX_WORDS = 100; // keeping your current value
+      // Content constraints
+      const MAX_WORDS = 200;
 
       // Auto-fit settings
       const BASE_FONT_SIZE_PX = 20;
@@ -119,8 +116,6 @@
 
       let currentPageIndex = 0;
       let pagesLoaded = 0;
-
-      // Tracks whether we are currently generating the next page
       let nextPageInFlight = false;
 
       function clampToWords(text, maxWords) {
@@ -132,19 +127,15 @@
       function extractOutputText(data) {
         if (!data) return "";
 
-        // Some clients expose output_text as a convenience, so try it first if present
+        // Convenience field when present
         if (typeof data.output_text === "string" && data.output_text.trim()) {
           return data.output_text.trim();
         }
 
-        // Standard Responses output parsing
         if (!Array.isArray(data.output)) return "";
 
         const chunks = [];
         for (const item of data.output) {
-          // Newer and older shapes exist, so be liberal:
-          // - message items with content parts
-          // - sometimes direct output_text items
           if (item && item.type === "message" && Array.isArray(item.content)) {
             for (const part of item.content) {
               if (part && part.type === "output_text" && typeof part.text === "string") {
@@ -179,7 +170,7 @@
         return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(id));
       }
 
-      async function openAIResponses({ model, input, instructions, max_output_tokens, reasoningEffort, verbosity }) {
+      async function openAIResponses({ input, instructions, max_output_tokens }) {
         if (!apiKey) throw new Error("Missing API key.");
 
         let response;
@@ -195,11 +186,11 @@
                 "Authorization": "Bearer " + apiKey
               },
               body: JSON.stringify({
-                model,
+                model: MODEL,
                 instructions,
                 input,
-                reasoning: { effort: reasoningEffort },
-                text: { verbosity },
+                reasoning: { effort: REASONING_EFFORT },
+                text: { verbosity: VERBOSITY },
                 max_output_tokens
               })
             },
@@ -219,10 +210,12 @@
 
           const timeoutHint =
             err && err.name === "AbortError"
-              ? "\n\nRequest timed out. Try a faster model for the chain step (gpt-5-nano) or increase REQUEST_TIMEOUT_MS."
+              ? "\n\nRequest timed out. Increase REQUEST_TIMEOUT_MS if needed."
               : "";
 
-          throw new Error(`${err && err.message ? err.message : String(err)}${extra}${corsHint}${timeoutHint}`);
+          throw new Error(
+            `${err && err.message ? err.message : String(err)}${extra}${corsHint}${timeoutHint}`
+          );
         }
 
         let data = null;
@@ -252,11 +245,6 @@
         }
 
         return text;
-      }
-
-      function addErrorPage(title, err) {
-        const msg = err && err.message ? err.message : String(err);
-        addPage(`${title}\n\n${msg}`);
       }
 
       function fitsInPage(el) {
@@ -311,6 +299,11 @@
         return addPage("Loading…");
       }
 
+      function addErrorPage(title, err) {
+        const msg = err && err.message ? err.message : String(err);
+        addPage(`${title}\n\n${msg}`);
+      }
+
       // Refit all pages on resize/orientation change
       window.addEventListener("resize", () => {
         const pages = document.querySelectorAll(".page");
@@ -328,12 +321,9 @@
           `The search term is: "${term}"`;
 
         const text = await openAIResponses({
-          model: MODEL_SUMMARY,
           instructions: "You are a creative and analytical research assistant.",
           input: [{ role: "user", content: prompt }],
-          max_output_tokens: 260,
-          reasoningEffort: DEFAULT_REASONING_EFFORT,
-          verbosity: DEFAULT_VERBOSITY
+          max_output_tokens: 320
         });
 
         return clampToWords(text, MAX_WORDS);
@@ -349,12 +339,9 @@
           `Return only the search term.`;
 
         const text = await openAIResponses({
-          model: MODEL_CHAIN,
           instructions: "You are a creative and analytical research assistant.",
           input: [{ role: "user", content: prompt }],
-          max_output_tokens: 30,
-          reasoningEffort: CHAIN_REASONING_EFFORT,
-          verbosity: CHAIN_VERBOSITY
+          max_output_tokens: 40
         });
 
         return text.trim().split("\n")[0].trim();
@@ -377,22 +364,21 @@
       }
 
       async function ensureNextPageLoaded() {
-        // If we already have a request running, do nothing
         if (nextPageInFlight) return;
-
-        // If there is already at least one page ahead of the current page, do nothing
         if (pagesLoaded > currentPageIndex + 1) return;
 
         nextPageInFlight = true;
 
-        // Create an actual next page immediately so scroll works
+        // Create the next page immediately so the user can scroll into it
         const placeholder = addLoadingPage();
 
         try {
           await generateIntoPlaceholder(placeholder);
         } catch (err) {
           console.error(err);
-          placeholder.innerText = `Failed to load next page\n\n${err && err.message ? err.message : String(err)}`;
+          placeholder.innerText = `Failed to load next page\n\n${
+            err && err.message ? err.message : String(err)
+          }`;
           placeholder.style.fontSize = BASE_FONT_SIZE_PX + "px";
           placeholder.style.lineHeight = "1.35";
           requestAnimationFrame(() => fitTextToPage(placeholder));
@@ -401,7 +387,7 @@
         }
       }
 
-      // Scroll behaviour: when user goes halfway into the next page, snap and queue another
+      // Scroll behaviour
       document.getElementById("pages").addEventListener("scroll", () => {
         const pagesContainer = document.getElementById("pages");
         const scrollPosition = pagesContainer.scrollTop;
@@ -415,7 +401,10 @@
               behavior: "smooth"
             });
 
-            // Ensure there will be yet another page ready (or loading) beyond this one
+            // Make sure there is always one more page beyond the current
+            ensureNextPageLoaded();
+          } else {
+            // If we reached the last available page (rare), start loading another
             ensureNextPageLoaded();
           }
         }
