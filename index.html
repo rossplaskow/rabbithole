@@ -97,8 +97,8 @@
       const VERBOSITY = "medium";
 
       // Content constraints
-      const MAX_WORDS = 70;
-      const MAX_CHAIN_WORDS = 10;
+      const MAX_WORDS = 100;
+      const MAX_CHAIN_WORDS = 4;
 
       // Auto-fit
       const BASE_FONT_SIZE_PX = 20;
@@ -343,8 +343,8 @@
       async function getChainTermStreaming() {
         const prompt =
           `Based on the following chain of subjects: ${searchTerms.join(", ")},\n` +
-          `Return a single concise search term that moves deeper into the subject.\n` +
-          `No words from the previous term.\n` +
+          `Return a single concise search term that moves deeper into the wider subject.\n` +
+          `No words from the previous terms can be used.\n` +
           `Maximum ${MAX_CHAIN_WORDS} words.\n` +
           `Return only the search term.`;
 
@@ -367,7 +367,7 @@
 
       async function streamSummaryIntoPage(term, pageEl) {
         const prompt =
-          `Generate a short, engaging research summary that fits on a phone screen.\n` +
+          `Generate a short summary of the subject.\n` +
           `Format:\n` +
           `Line 1: title (exactly the search term)\n` +
           `Line 2+: summary\n\n` +
